@@ -1313,6 +1313,13 @@ pub fn Runtime(comptime App: type) type {
             app.total_input_tokens = 0;
             app.total_output_tokens = 0;
             app.total_web_search_requests = 0;
+            if (comptime @hasField(App, "goal")) {
+                if (app.goal) |old_goal| {
+                    var old = old_goal;
+                    old.deinit(app.alloc);
+                }
+                app.goal = if (state.goal) |goal| try goal.dupe(app.alloc) else null;
+            }
         }
 
         fn beginFreshJsHostSession(app: *App) !void {
@@ -1334,6 +1341,13 @@ pub fn Runtime(comptime App: type) type {
             app.total_input_tokens = 0;
             app.total_output_tokens = 0;
             app.total_web_search_requests = 0;
+            if (comptime @hasField(App, "goal")) {
+                if (app.goal) |old_goal| {
+                    var old = old_goal;
+                    old.deinit(app.alloc);
+                }
+                app.goal = null;
+            }
         }
 
         pub fn clearSession(app: *App) !void {
@@ -1796,6 +1810,13 @@ pub fn Runtime(comptime App: type) type {
             app.total_input_tokens = state.total_input_tokens;
             app.total_output_tokens = state.total_output_tokens;
             app.total_web_search_requests = 0;
+            if (comptime @hasField(App, "goal")) {
+                if (app.goal) |old_goal| {
+                    var old = old_goal;
+                    old.deinit(app.alloc);
+                }
+                app.goal = if (state.goal) |goal| try goal.dupe(app.alloc) else null;
+            }
 
             if (comptime @hasDecl(App, "beginResumeProjection")) {
                 const projection_started_ns = io_mod.nanoTimestamp();
@@ -2201,6 +2222,22 @@ pub fn Runtime(comptime App: type) type {
                 .strict,
                 finished.snapshot_file_ownership,
             );
+        }
+
+        pub fn commitGoalState(app: *App) !void {
+            if (comptime !@hasField(App, "session_persistence")) return;
+            commitJsHostSnapshot(app, "goal");
+            if (comptime runtime_profile.allows(App, .js_host_sessions)) return;
+            if (app.session_persistence.writable == null) {
+                try beginFreshPersistedSession(app);
+            }
+            app.session_persistence.write_mutex.lockUncancelable(io_mod.getIo());
+            defer app.session_persistence.write_mutex.unlock(io_mod.getIo());
+            const loaded = if (app.session_persistence.writable) |*value|
+                value
+            else
+                return error.SessionPersistenceUnavailable;
+            try loaded.persistGoalState(app.alloc, app.goal, io_mod.milliTimestamp());
         }
 
         pub fn persistUsageCheckpoint(
@@ -4505,7 +4542,18 @@ pub fn Runtime(comptime App: type) type {
                 try checkpoint.dupe(app.alloc)
             else
                 null;
-            errdefer if (recovery_checkpoint) |*checkpoint| checkpoint.deinit(app.alloc);
+            errdefer if (recovery_checkpoint) |checkpoint| {
+                var owned = checkpoint;
+                owned.deinit(app.alloc);
+            };
+            const goal = if (comptime @hasField(App, "goal"))
+                if (app.goal) |value| try value.dupe(app.alloc) else null
+            else
+                null;
+            errdefer if (goal) |value| {
+                var owned = value;
+                owned.deinit(app.alloc);
+            };
             return .{
                 .id = id,
                 .origin_workspace_root = origin,
@@ -4520,6 +4568,7 @@ pub fn Runtime(comptime App: type) type {
                 .permission_state = permission_state,
                 .usage = usage,
                 .recovery_checkpoint = recovery_checkpoint,
+                .goal = goal,
             };
         }
 
@@ -4560,6 +4609,7 @@ pub fn Runtime(comptime App: type) type {
                 .total_output_tokens = 0,
                 .permission_state = permission_state,
                 .usage = usage,
+                .goal = null,
             };
         }
 

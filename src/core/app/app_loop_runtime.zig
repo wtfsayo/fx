@@ -37,17 +37,29 @@ pub fn Runtime(comptime App: type) type {
         /// app thread because it snapshots session, context, credentials, and UI
         /// state that background threads must not mutate.
         pub fn tick(app: *App, now_ms: i64) !void {
+            _ = try admit_due(app, now_ms, true);
+        }
+
+        /// Give one due scheduled prompt priority at a completed goal-turn
+        /// boundary. The caller alternates back to goal continuation afterward.
+        pub fn admit_due_before_goal_continuation(app: *App, now_ms: i64) !bool {
+            return admit_due(app, now_ms, false);
+        }
+
+        fn admit_due(app: *App, now_ms: i64, require_pacer_idle: bool) !bool {
             const pruned = scheduler(app).prune(now_ms);
             if (pruned > 0) {
                 debug_trace.logf("loop", "pruned tasks count={d}", .{pruned});
             }
-            if (scheduler(app).count() == 0) return;
-            if (comptime @hasField(App, "pacer")) {
-                if (app.pacer.hasPending()) return;
+            if (scheduler(app).count() == 0) return false;
+            if (require_pacer_idle) {
+                if (comptime @hasField(App, "pacer")) {
+                    if (app.pacer.hasPending()) return false;
+                }
             }
-            if (!app.worker.is_idle_for_prompt_admission()) return;
+            if (!app.worker.is_idle_for_prompt_admission()) return false;
 
-            const due = scheduler(app).next_due(now_ms) orelse return;
+            const due = scheduler(app).next_due(now_ms) orelse return false;
             const accepted = app.enqueuePrompt(due.prompt) catch |err| {
                 try scheduler(app).defer_failed_admission(due, now_ms);
                 debug_trace.logf(
@@ -66,14 +78,15 @@ pub fn Runtime(comptime App: type) type {
                     .tone = .warning,
                     .body = body,
                 }, true);
-                return;
+                return false;
             };
             if (!accepted) {
                 try scheduler(app).defer_failed_admission(due, now_ms);
-                return;
+                return false;
             }
             try scheduler(app).mark_fired(due, now_ms);
             debug_trace.logf("loop", "prompt admitted task_id={s}", .{due.id});
+            return true;
         }
 
         fn schedule(app: *App, create: loop_command.Create) !void {
@@ -316,6 +329,16 @@ test "tick waits for paced output before admitting a due task" {
     try std.testing.expectEqual(@as(usize, 0), app.admission_count);
     app.pacer.pending = false;
     try Runtime(TestApp).tick(&app, 60_000);
+    try std.testing.expectEqual(@as(usize, 1), app.admission_count);
+}
+
+test "goal continuation boundary admits one due task despite paced output" {
+    var app = TestApp.init(std.testing.allocator);
+    defer app.deinit();
+    app.pacer.pending = true;
+    try schedule_test_task(&app, false);
+
+    try std.testing.expect(try Runtime(TestApp).admit_due_before_goal_continuation(&app, 60_000));
     try std.testing.expectEqual(@as(usize, 1), app.admission_count);
 }
 

@@ -102,7 +102,17 @@ describe.skipIf(TMUX_SKIP)("tui: no-key slash commands", () => {
       expect(stopped).toContain(`Stopped scheduled task ${id}.`);
 
       await session.sendText("/loop 5m task from the old session");
-      await session.waitForText("every 5 minutes", 5_000);
+      const oldSessionTask = await session.waitForPane((pane) => {
+        const scheduledIds = [
+          ...pane.matchAll(/Scheduled task ([0-9a-f]{12}) every 5 minutes/g),
+        ].map((match) => match[1]);
+        return new Set(scheduledIds).size >= 2;
+      }, 5_000);
+      const scheduledIds = [
+        ...oldSessionTask.matchAll(/Scheduled task ([0-9a-f]{12}) every 5 minutes/g),
+      ].map((match) => match[1]);
+      expect(new Set(scheduledIds).size).toBeGreaterThanOrEqual(2);
+      expect(scheduledIds).toContain(id);
       await session.sendText("/new");
       await session.waitForComposer(5_000);
       await session.sendText("/loop list");
@@ -269,6 +279,67 @@ describe.skipIf(TMUX_SKIP)("tui: no-key slash commands", () => {
       expect(readFileSync(stderrPath, "utf8")).toBe("");
     },
     TIMEOUT * 2,
+  );
+
+  test(
+    "due loop work runs before the next active-goal continuation",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "fx-loop-goal-arbitration-"));
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      const stderrPath = join(root, "stderr.log");
+      mkdirSync(home);
+      mkdirSync(workspace);
+      tempDirs.push(root);
+
+      gateway = startFakeGateway([
+        async () => {
+          await Bun.sleep(2_500);
+          return fakeGatewayToolCall("create-goal", "create_goal", {
+            objective: "verify loop arbitration",
+            token_budget: 1_000,
+          });
+        },
+        fakeGatewayFinalText("initial goal stage finished"),
+        fakeGatewayFinalText("scheduled loop stage finished"),
+        fakeGatewayToolCall("complete-goal", "update_goal", {
+          status: "complete",
+        }),
+        fakeGatewayFinalText("arbitrated goal lifecycle complete"),
+      ]);
+      session = await TmuxSession.create({
+        cwd: workspace,
+        stderrPath,
+        env: {
+          HOME: home,
+          AI_GATEWAY_API_KEY: "loop-goal-arbitration-key",
+          VERCEL_OIDC_TOKEN: undefined,
+          FX_AUTO_UPGRADE: "0",
+          FX_DISABLE_KEYCHAIN: "1",
+          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          FX_E2E_LOOP_INTERVAL_SECS: "2",
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_PERMISSION_MODE: "yolo",
+        },
+      });
+      await session.waitForComposer(10_000);
+
+      const loopPrompt = "LOOP_GOAL_ARBITRATION_PROMPT";
+      await session.sendText(`/loop once 1m ${loopPrompt}`);
+      await session.waitForText("Scheduled task", 5_000);
+      await session.sendText("Create the goal and keep working until it is complete.");
+      await session.waitForText("arbitrated goal lifecycle complete", 20_000);
+
+      expect(gateway.requestCount()).toBe(5);
+      expect(gateway.requests[2]?.body).toContain(loopPrompt);
+      expect(gateway.requests[3]?.body).toContain(
+        "Continue working toward the active thread goal.",
+      );
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    },
+    TIMEOUT,
   );
 
   test(

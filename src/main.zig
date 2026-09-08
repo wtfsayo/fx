@@ -574,6 +574,7 @@ const App = struct {
     goal_tool_context: goal_module.GoalToolContext = .{},
     goal_terminal_transition_pending_accounting: bool = false,
     goal_budget_wrapup_pending_accounting: bool = false,
+    goal_continuation_deferred_for_loop: bool = false,
     diff_entries: std.ArrayList(@import("core/output/diff.zig").DiffEntry) = .empty,
     next_diff_id: u32 = 1,
 
@@ -2631,6 +2632,13 @@ const App = struct {
     }
 
     pub fn queueGoalContinuation(self: *App, prompt: []const u8, objective: []const u8) !void {
+        if (!self.goal_continuation_deferred_for_loop and
+            try LoopAppRuntime.admit_due_before_goal_continuation(self, io_mod.monotonic_milli_timestamp()))
+        {
+            self.goal_continuation_deferred_for_loop = true;
+            return;
+        }
+        self.goal_continuation_deferred_for_loop = false;
         _ = try self.snapshotAndQueuePrompt(prompt, &.{}, null, null, objective, 0, false);
     }
 

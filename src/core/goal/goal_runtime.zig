@@ -88,6 +88,9 @@ pub fn replaceOwned(comptime App: type, app: *App, next: ?goal_module.goal_store
         if (comptime @hasField(App, "goal_budget_wrapup_pending_accounting")) {
             app.goal_budget_wrapup_pending_accounting = false;
         }
+        if (comptime @hasField(App, "goal_continuation_deferred_for_loop")) {
+            app.goal_continuation_deferred_for_loop = false;
+        }
     }
     if (previous) |old_goal| {
         var owned = old_goal;

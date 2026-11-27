@@ -57,6 +57,7 @@ fn executeOAuthRequest(
     request: oauth_transport.Request,
 ) !oauth_transport.Response {
     try checkRequestBounds(request);
+    if (request.extra_headers.len != 0) return error.OAuthTransportUnavailable;
     const Header = struct { name: []const u8, value: []const u8 };
     var header_buf: [2]Header = undefined;
     var header_count: usize = 0;

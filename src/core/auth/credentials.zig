@@ -4,6 +4,8 @@ const chatgpt_oauth = @import("chatgpt_oauth.zig");
 const chatgpt_session = @import("chatgpt_session.zig");
 const grok_oauth = @import("grok_oauth.zig");
 const grok_session = @import("grok_session.zig");
+const claude_oauth = @import("claude_oauth.zig");
+const claude_session = @import("claude_session.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
 const io_mod = @import("../shared/io.zig");
@@ -41,6 +43,7 @@ pub const CatalogPublicOnly = union(enum) {
     authenticated_credential_rejected: Source,
     chatgpt_subscription,
     grok_subscription,
+    claude_subscription,
 
     fn credentialSource(self: CatalogPublicOnly) ?Source {
         return switch (self) {
@@ -51,6 +54,7 @@ pub const CatalogPublicOnly = union(enum) {
             .authenticated_credential_rejected => |source| source,
             .chatgpt_subscription => .chatgpt_subscription,
             .grok_subscription => .grok_subscription,
+            .claude_subscription => .claude_subscription,
         };
     }
 };
@@ -64,6 +68,7 @@ pub const CatalogAuthenticatedSource = enum {
     stored_key,
     chatgpt_subscription,
     grok_subscription,
+    claude_subscription,
 
     fn credentialSource(self: CatalogAuthenticatedSource) Source {
         return switch (self) {
@@ -73,6 +78,7 @@ pub const CatalogAuthenticatedSource = enum {
             .stored_key => .stored_key,
             .chatgpt_subscription => .chatgpt_subscription,
             .grok_subscription => .grok_subscription,
+            .claude_subscription => .claude_subscription,
         };
     }
 };
@@ -121,7 +127,8 @@ pub const CatalogAccess = union(enum) {
             .public_only => null,
             .authenticated => |access| if (access.authority == .explicit or
                 access.source == .chatgpt_subscription or
-                access.source == .grok_subscription)
+                access.source == .grok_subscription or
+                access.source == .claude_subscription)
                 null
             else
                 .{
@@ -233,6 +240,7 @@ pub fn catalogAccessForCredentialAndAccount(
         .stored_key => .stored_key,
         .chatgpt_subscription => .chatgpt_subscription,
         .grok_subscription => .grok_subscription,
+        .claude_subscription => .claude_subscription,
         .host_managed => unreachable,
         .configured => return .{ .public_only = .no_credential },
         .fx_login => blk: {
@@ -247,8 +255,8 @@ pub fn catalogAccessForCredentialAndAccount(
         .authenticated = .{
             .source = authenticated_source,
             .credential = credential,
-            .team_context = if (authenticated_source == .chatgpt_subscription or authenticated_source == .grok_subscription) null else team_context,
-            .account_id = if (authenticated_source == .grok_subscription) account_id else null,
+            .team_context = if (sourceIsSubscription(selected_source)) null else team_context,
+            .account_id = if (authenticated_source == .grok_subscription or authenticated_source == .claude_subscription) account_id else null,
         },
     };
 }
@@ -278,6 +286,8 @@ pub const missing_chatgpt_credential_message = "fx needs a Codex subscription lo
 pub const missing_chatgpt_interactive_credential_message = "Codex needs a subscription login. Run /login, open Connections, then choose Codex subscription.";
 pub const missing_grok_credential_message = "fx needs a Grok subscription login for this model. Run fx login grok.";
 pub const missing_grok_interactive_credential_message = "Grok needs a subscription login. Run /login, open Connections, then choose Grok subscription.";
+pub const missing_claude_credential_message = "fx needs a Claude subscription login for this model. Run fx login claude.";
+pub const missing_claude_interactive_credential_message = "Claude needs a subscription login. Run /login, open Connections, then choose Claude subscription.";
 pub const unreadable_store_message = "fx could not read the stored API key from " ++ stored_key_backend_label ++ ". A key may be saved but unreadable. Set FX_TRACE_LOG for the failing step, or set AI_GATEWAY_API_KEY.";
 pub const host_managed_auth_message = "Authentication is managed by the host.";
 
@@ -426,7 +436,7 @@ pub fn resolveForProvider(
         transport,
         secret_store,
         mode,
-        if (preferred == .chatgpt_subscription or preferred == .grok_subscription) null else preferred,
+        if (preferred != null and sourceIsSubscription(preferred.?)) null else preferred,
     );
 }
 
@@ -541,6 +551,10 @@ fn loadPreferredSource(
             .stored => loadStoredGrokCredential(alloc),
             .refresh_if_needed => loadGrokCredential(alloc, transport, .if_needed),
         },
+        .claude_subscription => switch (mode) {
+            .stored => loadStoredClaudeCredential(alloc),
+            .refresh_if_needed => loadClaudeCredential(alloc, transport, .if_needed),
+        },
         else => loadSource(alloc, transport, secret_store, source),
     };
 }
@@ -558,6 +572,7 @@ pub fn loadSource(
         .stored_key => loadStoredKeyCredential(alloc, secret_store),
         .chatgpt_subscription => loadChatGptCredential(alloc, transport, .if_needed),
         .grok_subscription => loadGrokCredential(alloc, transport, .if_needed),
+        .claude_subscription => loadClaudeCredential(alloc, transport, .if_needed),
         .host_managed, .configured => null,
     };
 }
@@ -594,6 +609,13 @@ pub fn sourceExists(
             error.OutOfMemory => return err,
             else => blk: {
                 debug_trace.logf("auth", "source probe failed source=grok err={s}", .{@errorName(err)});
+                break :blk false;
+            },
+        },
+        .claude_subscription => claude_oauth.sourceExists(alloc) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => blk: {
+                debug_trace.logf("auth", "source probe failed source=claude err={s}", .{@errorName(err)});
                 break :blk false;
             },
         },
@@ -636,6 +658,7 @@ pub fn sourcePresence(
             secret_store.presence(),
         .chatgpt_subscription => chatgpt_session.presence(),
         .grok_subscription => grok_session.presence(),
+        .claude_subscription => claude_session.presence(),
         .host_managed, .configured => .missing,
     };
 }
@@ -654,6 +677,7 @@ pub fn requireSignInStorage(source: Source) error{CredentialStorageUnavailable}!
         .fx_login => try oauth_session.requireSignInStorage(),
         .chatgpt_subscription => try chatgpt_session.requireSignInStorage(),
         .grok_subscription => try grok_session.requireSignInStorage(),
+        .claude_subscription => try claude_session.requireSignInStorage(),
         else => {},
     }
 }
@@ -727,6 +751,30 @@ fn loadStoredGrokCredential(alloc: std.mem.Allocator) !?Credential {
     return loadGrokCredential(alloc, oauth_transport.unavailable_provider, .stored);
 }
 
+fn loadClaudeCredential(
+    alloc: std.mem.Allocator,
+    transport: oauth_transport.Provider,
+    mode: claude_oauth.RefreshMode,
+) !?Credential {
+    try requireSourceStorage(.claude_subscription);
+    var access = (try claude_oauth.loadAccess(alloc, transport, mode)) orelse return null;
+    defer access.deinit(alloc);
+    const token = access.access_token;
+    access.access_token = &.{};
+    const account_id = access.account_id;
+    access.account_id = &.{};
+    return .{
+        .token = token,
+        .source = .claude_subscription,
+        .account_id = account_id,
+        .refresh_after_ms = access.refresh_after_ms,
+    };
+}
+
+fn loadStoredClaudeCredential(alloc: std.mem.Allocator) !?Credential {
+    return loadClaudeCredential(alloc, oauth_transport.unavailable_provider, .stored);
+}
+
 fn nonEmptyEnvValue(name: []const u8) ?[]const u8 {
     return nonEmptyValue(io_mod.getenv(name));
 }
@@ -767,6 +815,7 @@ pub fn loadStoredSource(alloc: std.mem.Allocator, source: Source) !?Credential {
         .fx_login => loadStoredFxLoginCredential(alloc),
         .chatgpt_subscription => loadStoredChatGptCredential(alloc),
         .grok_subscription => loadStoredGrokCredential(alloc),
+        .claude_subscription => loadStoredClaudeCredential(alloc),
         .vercel_oidc_token, .ai_gateway_api_key, .stored_key, .host_managed, .configured => null,
     };
 }
@@ -806,6 +855,18 @@ pub fn refreshGrokCredential(
 ) !?Credential {
     const mode: grok_oauth.RefreshMode = if (rejected_token) |token| .{ .replace_rejected = token } else .force;
     return loadGrokCredential(alloc, transport, mode);
+}
+
+/// Refreshes the saved Claude login after Anthropic rejected `rejected_token`, as
+/// `refreshFxLoginCredential` does for the fx login. Null rotates it
+/// whatever it holds.
+pub fn refreshClaudeCredential(
+    alloc: std.mem.Allocator,
+    transport: oauth_transport.Provider,
+    rejected_token: ?[]const u8,
+) !?Credential {
+    const mode: claude_oauth.RefreshMode = if (rejected_token) |token| .{ .replace_rejected = token } else .force;
+    return loadClaudeCredential(alloc, transport, mode);
 }
 
 fn refreshFxLoginCredentialLocked(
@@ -1004,13 +1065,21 @@ pub fn sourceLabel(source: Source) []const u8 {
         .stored_key => "stored API key (" ++ stored_key_backend_label ++ ")",
         .chatgpt_subscription => "Codex subscription",
         .grok_subscription => "Grok subscription",
+        .claude_subscription => "Claude subscription",
         .host_managed => "host managed",
         .configured => "configured provider",
     };
 }
 
 pub fn sourceRefreshable(source: Source) bool {
-    return source == .fx_login or source == .chatgpt_subscription or source == .grok_subscription;
+    return source == .fx_login or sourceIsSubscription(source);
+}
+
+pub fn sourceIsSubscription(source: Source) bool {
+    return switch (source) {
+        .chatgpt_subscription, .grok_subscription, .claude_subscription => true,
+        else => false,
+    };
 }
 
 test "stored key label discloses the backend that answered" {
@@ -1081,6 +1150,12 @@ test "catalog access isolates public and authenticated provider credentials" {
     try std.testing.expectEqualStrings("acct_grok", grok.accountId().?);
     try std.testing.expect(grok.teamContext() == null);
 
+    const claude = catalogAccessForCredentialAndAccount(.claude_subscription, "claude-secret", "unrelated-team", "acct_claude");
+    try std.testing.expectEqual(Source.claude_subscription, claude.credentialSource().?);
+    try std.testing.expectEqualStrings("acct_claude", claude.accountId().?);
+    try std.testing.expect(claude.teamContext() == null);
+    try std.testing.expect(claude.publicFallbackAfterRejection() == null);
+
     const rejected: CatalogAccess = .{ .public_only = .{ .authenticated_credential_rejected = .stored_key } };
     try std.testing.expectEqual(CatalogPublicOnlyReason.authenticated_credential_rejected, rejected.publicOnlyReason().?);
     try std.testing.expectEqual(Source.stored_key, rejected.credentialSource().?);
@@ -1124,7 +1199,7 @@ test "fx login catalog access requires a fresh credential and selected team" {
 }
 
 test "subscription catalog access never sends refresh-due credentials" {
-    for ([_]Source{ .chatgpt_subscription, .grok_subscription }) |source| {
+    for ([_]Source{ .chatgpt_subscription, .grok_subscription, .claude_subscription }) |source| {
         var credential = Credential{
             .token = try std.testing.allocator.dupe(u8, "expired-subscription-token"),
             .source = source,
@@ -1449,6 +1524,7 @@ test "credential source presence reads metadata without parsing session secrets"
         .{ .source = .fx_login, .file_name = profile_paths.auth_file_name },
         .{ .source = .chatgpt_subscription, .file_name = profile_paths.chatgpt_auth_file_name },
         .{ .source = .grok_subscription, .file_name = profile_paths.grok_auth_file_name },
+        .{ .source = .claude_subscription, .file_name = claude_session.auth_file_name },
     };
     for (cases) |case| {
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1662,6 +1738,33 @@ const SavedLoginFixture = struct {
         self.tmp.cleanup();
     }
 };
+
+test "stored Claude resolution never refreshes or crosses into Gateway" {
+    const alloc = std.testing.allocator;
+    const now = io_mod.milliTimestamp();
+    var fixture = try SavedLoginFixture.install(alloc, claude_session.auth_file_name, .{
+        .version = 1,
+        .access_token = "fixture-access",
+        .refresh_token = "fixture-refresh",
+        .expires_at_ms = now - 1,
+        .account_id = "acct_fixture",
+    });
+    defer fixture.deinit();
+
+    const store = host.unavailable_secret_store;
+    const transport = oauth_transport.unavailable_provider;
+    const resolved = try resolveForProvider(alloc, transport, store, .stored, .claude, .fx_login);
+    var credential = resolved.credential orelse return error.TestUnexpectedResult;
+    defer credential.deinit(alloc);
+    try std.testing.expectEqual(Source.claude_subscription, credential.source);
+    try std.testing.expectEqualStrings("acct_fixture", credential.accountId().?);
+    try std.testing.expect(credential.needsRefreshAt(now));
+
+    const gateway = try resolveForProvider(alloc, transport, store, .stored, .gateway, .claude_subscription);
+    var gateway_credential = gateway.credential;
+    defer if (gateway_credential) |*unexpected| unexpected.deinit(alloc);
+    try std.testing.expect(gateway_credential == null);
+}
 
 /// An fx login whose saved tokens and expiry the test chooses.
 fn savedFxLogin(alloc: std.mem.Allocator, access_token: []const u8, refresh_token: []const u8, expires_at_ms: i64) !SavedLoginFixture {

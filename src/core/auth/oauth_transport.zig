@@ -19,6 +19,9 @@ pub const Request = struct {
     payload: ?[]const u8 = null,
     /// Optional preformatted Authorization value, borrowed for this request.
     authorization: ?[]const u8 = null,
+    /// Additional provider headers, borrowed for this request. Use the
+    /// dedicated fields for authorization and content type.
+    extra_headers: []const std.http.Header = &.{},
     cancel_flag: ?*std.atomic.Value(bool) = null,
     deadline: ?std.Io.Clock.Timestamp = null,
     /// Overrides the transport's response size limit for a request whose
@@ -116,6 +119,11 @@ test "cancellable transport adds its cancel flag to every request" {
         fn execute(raw: ?*anyopaque, _: Allocator, request: Request) !Response {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.seen = request.cancel_flag;
+            if (request.method == .get) {
+                try std.testing.expectEqual(@as(usize, 1), request.extra_headers.len);
+                try std.testing.expectEqualStrings("provider-version", request.extra_headers[0].name);
+                try std.testing.expectEqualStrings("test-version", request.extra_headers[0].value);
+            }
             return .{ .disposition = .accepted, .body = &.{} };
         }
     };
@@ -125,7 +133,11 @@ test "cancellable transport adds its cancel flag to every request" {
         .inner = .{ .context = &recorder, .execute_fn = Recorder.execute },
         .cancel_flag = &cancel,
     };
-    var response = try cancellable.provider().execute(std.testing.allocator, .{ .method = .get, .url = "https://issuer.test" });
+    var response = try cancellable.provider().execute(std.testing.allocator, .{
+        .method = .get,
+        .url = "https://issuer.test",
+        .extra_headers = &.{.{ .name = "provider-version", .value = "test-version" }},
+    });
     defer response.deinit(std.testing.allocator);
     try std.testing.expectEqual(&cancel, recorder.seen.?);
 

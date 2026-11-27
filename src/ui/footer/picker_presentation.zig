@@ -59,7 +59,7 @@ pub fn authPickerRowCount(view: auth_runtime.PickerView) u16 {
     if (view.stage == .sign_in) {
         return switch (view.sign_in_source) {
             .chatgpt_subscription => 4,
-            .grok_subscription => if (view.sign_in_code_visible) 7 else 5,
+            .grok_subscription, .claude_subscription => if (view.sign_in_code_visible) 7 else 5,
             else => 7,
         };
     }
@@ -84,7 +84,7 @@ fn setupChoiceLabel(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                 .switch_provider => "Model provider",
                 .change_team => "Vercel team",
                 .switch_credential => "Credential source",
-                .login, .chatgpt_login, .grok_login, .setup, .automatic => "",
+                .login, .chatgpt_login, .grok_login, .claude_login, .setup, .automatic => "",
             },
             .provider, .source, .team => "",
         },
@@ -93,6 +93,7 @@ fn setupChoiceLabel(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                 .login => "Vercel account",
                 .chatgpt_login => "Codex subscription",
                 .grok_login => "Grok subscription",
+                .claude_login => "Claude subscription",
                 .setup => "AI Gateway API key",
                 .connections, .change_team, .switch_credential, .switch_provider, .automatic => "",
             },
@@ -114,7 +115,7 @@ fn setupChoiceValue(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                     view.activeSourceLabel()
                 else
                     "not connected",
-                .login, .chatgpt_login, .grok_login, .setup, .automatic => "",
+                .login, .chatgpt_login, .grok_login, .claude_login, .setup, .automatic => "",
             },
             .provider, .source, .team => "",
         },
@@ -123,6 +124,7 @@ fn setupChoiceValue(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                 .login => if (view.fx_login_session_available) "connected" else "not connected",
                 .chatgpt_login => if (view.available_sources.contains(.chatgpt_subscription)) "connected" else "not connected",
                 .grok_login => if (view.available_sources.contains(.grok_subscription)) "connected" else "not connected",
+                .claude_login => if (view.available_sources.contains(.claude_subscription)) "connected" else "not connected",
                 .setup => if (view.available_sources.contains(.stored_key))
                     "stored"
                 else if (view.available_sources.contains(.ai_gateway_api_key))
@@ -317,7 +319,7 @@ fn signInProjectedRowIndex(
         return prioritizedRowIndex(4, &codex_priority, row_index, row_count);
     }
     const grok_browser_priority = [_]u16{ 2, 3, 0, 4, 1 };
-    if (source == .grok_subscription and !manual_code_visible) {
+    if ((source == .grok_subscription or source == .claude_subscription) and !manual_code_visible) {
         return prioritizedRowIndex(5, &grok_browser_priority, row_index, row_count);
     }
 
@@ -356,18 +358,16 @@ fn onboardingProjectedRowIndex(view: auth_runtime.PickerView, row_index: u16, ro
     if (row_count >= 18) return row_index;
 
     const selected_row: u16 = 8 + @as(u16, @intCast(view.selectedIndex()));
-    const priority = [_]u16{ selected_row, 11, 9, 10, 8, 15, 7, 12, 5, 0, 2, 3, 6, 13, 14, 1, 4, 16, 17 };
-
-    var projected_index: u16 = 0;
-    for (0..18) |source_row| {
-        for (priority[0..@min(row_count, priority.len)]) |included_row| {
-            if (source_row != included_row) continue;
-            if (projected_index == row_index) return @intCast(source_row);
-            projected_index += 1;
-            break;
-        }
+    const order = [_]u16{ 12, 9, 10, 11, 8, 15, 7, 13, 5, 0, 2, 3, 6, 14, 1, 4, 16, 17 };
+    var priority: [order.len]u16 = undefined;
+    priority[0] = selected_row;
+    var len: usize = 1;
+    for (order) |candidate| {
+        if (candidate == selected_row or len == priority.len) continue;
+        priority[len] = candidate;
+        len += 1;
     }
-    return 17;
+    return prioritizedRowIndex(18, priority[0..len], row_index, row_count);
 }
 
 fn composeOnboardingPickerRow(
@@ -387,6 +387,7 @@ fn composeOnboardingPickerRow(
         9 => 1,
         10 => 2,
         11 => 3,
+        12 => 4,
         else => null,
     };
     if (maybe_choice_index) |choice_index| {
@@ -414,8 +415,8 @@ fn composeOnboardingPickerRow(
         5 => "   You can change this anytime with /provider.",
         6 => "",
         7 => "   Get started",
-        12 => if (display_width.visibleWidthIgnoringAnsi(onboarding_note_link) <= width) onboarding_note_link else onboarding_note,
-        13, 14 => "",
+        13 => if (display_width.visibleWidthIgnoringAnsi(onboarding_note_link) <= width) onboarding_note_link else onboarding_note,
+        14 => "",
         15 => "   esc to set up later · explore all commands with /help",
         16, 17 => "",
         else => "",
@@ -451,7 +452,7 @@ fn composeSignInPickerRow(
     if (width == 0) return row;
     const accepts_manual_code = snapshot.accepts_manual_code;
 
-    const subscription_source = source == .chatgpt_subscription or source == .grok_subscription;
+    const subscription_source = source == .chatgpt_subscription or source == .grok_subscription or source == .claude_subscription;
     if (subscription_source and row_index == 0) {
         try row.appendSlice(alloc, ui_render.dim_style);
         const value_col = detailValueColumn(width);
@@ -469,7 +470,7 @@ fn composeSignInPickerRow(
         try row_text.appendSingleLineEllipsized(
             alloc,
             &row,
-            if (source == .chatgpt_subscription) "Sign in with Codex" else "Sign in with Grok",
+            if (source == .chatgpt_subscription) "Sign in with Codex" else if (source == .claude_subscription) "Sign in with Claude" else "Sign in with Grok",
             value_col,
         );
         if (status_col < width) {
@@ -504,7 +505,7 @@ fn composeSignInPickerRow(
             try row_text.appendClipped(
                 alloc,
                 &row,
-                if (source == .chatgpt_subscription) "Authorize with Codex" else "Authorize with Grok",
+                if (source == .chatgpt_subscription) "Authorize with Codex" else if (source == .claude_subscription) "Authorize with Claude" else "Authorize with Grok",
                 remaining,
             );
             try row.appendSlice(alloc, "\x1b[24m\x1b]8;;\x1b\\");
@@ -513,7 +514,7 @@ fn composeSignInPickerRow(
         return row;
     }
 
-    if (source == .grok_subscription and !manual_code_visible) {
+    if ((source == .grok_subscription or source == .claude_subscription) and !manual_code_visible) {
         try row.appendSlice(alloc, ui_render.dim_style);
         if (row_index == 3) {
             try row_text.appendClipped(
@@ -535,12 +536,12 @@ fn composeSignInPickerRow(
         else
             ui_render.dim_style,
     );
-    if (source == .grok_subscription and manual_code_visible and row_index == 4) {
+    if ((source == .grok_subscription or source == .claude_subscription) and manual_code_visible and row_index == 4) {
         try row_text.appendClipped(alloc, &row, "  Paste the code shown by xAI", width);
         try row.appendSlice(alloc, ui_render.reset_style);
         return row;
     }
-    if (source == .grok_subscription and manual_code_visible and row_index == 5) {
+    if ((source == .grok_subscription or source == .claude_subscription) and manual_code_visible and row_index == 5) {
         const prefix = "  ┃ ";
         try row_text.appendClipped(alloc, &row, prefix, width);
         const used: u16 = @intCast(@min(display_width.visibleWidth(prefix), width));
@@ -555,7 +556,7 @@ fn composeSignInPickerRow(
         try row.appendSlice(alloc, ui_render.reset_style);
         return row;
     }
-    if (source == .grok_subscription and manual_code_visible and row_index == 6) {
+    if ((source == .grok_subscription or source == .claude_subscription) and manual_code_visible and row_index == 6) {
         try row.appendSlice(alloc, ui_render.reset_style);
         return row;
     }
@@ -563,6 +564,8 @@ fn composeSignInPickerRow(
     const label = switch (row_index) {
         0 => if (source == .chatgpt_subscription)
             "   Sign in with Codex"
+        else if (source == .claude_subscription)
+            "   Sign in with Claude"
         else if (source == .grok_subscription)
             "   Sign in with Grok"
         else
@@ -574,6 +577,8 @@ fn composeSignInPickerRow(
             .{snapshot.verification_uri},
         ) catch if (source == .chatgpt_subscription)
             "   Open the Codex authorization page"
+        else if (source == .claude_subscription)
+            "   Open the Claude authorization page"
         else if (source == .grok_subscription)
             "   Open the Grok authorization page"
         else
@@ -2227,11 +2232,15 @@ test "auth onboarding composes the welcome copy and setup choices" {
     defer grok_row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, grok_row.items, "Sign in with Grok") != null);
 
-    var unselected_row = try composeAuthPickerRow(alloc, view, 11, authPickerRowCount(view), 100);
+    var claude_row = try composeAuthPickerRow(alloc, view, 11, authPickerRowCount(view), 100);
+    defer claude_row.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, claude_row.items, "Sign in with Claude") != null);
+
+    var unselected_row = try composeAuthPickerRow(alloc, view, 12, authPickerRowCount(view), 100);
     defer unselected_row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, unselected_row.items, "Add an API key") != null);
 
-    var narrow_note = try composeAuthPickerRow(alloc, view, 12, authPickerRowCount(view), 58);
+    var narrow_note = try composeAuthPickerRow(alloc, view, 13, authPickerRowCount(view), 58);
     defer narrow_note.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, narrow_note.items, "https://fx.sh/docs/stability") == null);
 

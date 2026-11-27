@@ -317,6 +317,7 @@ pub fn loginCommand(provider: model_provider.ProviderId) []const u8 {
         .gateway => "fx login",
         .codex => "fx login codex",
         .grok => "fx login grok",
+        .claude => "fx login claude",
         .configured => profile_paths.displayText("check the connection's auth in ~/.fx/settings.json"),
     };
 }
@@ -353,6 +354,7 @@ fn appendResolvedStartupCheck(
         snapshot.model = "";
         const fix: []const u8 = switch (err) {
             error.CodexModelNotSelected => "fx provider codex",
+            error.ClaudeModelNotSelected => "fx provider claude",
             error.GrokModelNotSelected => "fx provider grok",
             error.ConfiguredModelNotSelected => profile_paths.displayText("save a model under \"models\" in ~/.fx/settings.json"),
         };

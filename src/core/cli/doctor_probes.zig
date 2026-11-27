@@ -608,6 +608,7 @@ fn providerLabel(provider: model_provider.ProviderId) []const u8 {
         .gateway => "AI Gateway",
         .codex => "ChatGPT",
         .grok => "Grok",
+        .claude => "Claude",
         .configured => "the configured provider",
     };
 }

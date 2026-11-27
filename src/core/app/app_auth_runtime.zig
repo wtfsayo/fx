@@ -12,6 +12,7 @@ const auth_runtime = @import("../auth/auth_runtime.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const pending_revocation = @import("../auth/pending_revocation.zig");
 const chatgpt_oauth = @import("../auth/chatgpt_oauth.zig");
+const claude_oauth = @import("../auth/claude_oauth.zig");
 const grok_oauth = @import("../auth/grok_oauth.zig");
 const provider_catalog = @import("../auth/provider_catalog.zig");
 const auth_transition = @import("../auth/auth_transition.zig");
@@ -190,6 +191,7 @@ pub fn Runtime(comptime App: type) type {
                         .gateway => credentials.missing_interactive_credential_message,
                         .codex => credentials.missing_chatgpt_interactive_credential_message,
                         .grok => credentials.missing_grok_interactive_credential_message,
+                        .claude => credentials.missing_claude_interactive_credential_message,
                         .configured => "Configured provider authentication is unavailable. Check settings.json and its environment variable.",
                     },
                 }, true),
@@ -218,6 +220,8 @@ pub fn Runtime(comptime App: type) type {
                         "Configured provider authentication is unavailable. Check settings.json and its environment variable."
                     else if (provider == .grok)
                         credentials.missing_grok_interactive_credential_message
+                    else if (provider == .claude)
+                        credentials.missing_claude_interactive_credential_message
                     else
                         credentials.missing_chatgpt_interactive_credential_message,
                 }, true);
@@ -312,6 +316,7 @@ pub fn Runtime(comptime App: type) type {
                 return;
             }
             defer if (hold_turn_start) agent.worker.releaseTurnStartHold();
+            if (logout_provider == .claude) return logoutClaude(app, agent);
             if (logout_provider == .grok) return logoutGrok(app, agent);
             if (logout_provider == .codex) return logoutCodex(app, agent);
             return logoutFxLogin(app);
@@ -377,6 +382,24 @@ pub fn Runtime(comptime App: type) type {
             }
             try reconcileSubscriptionLogout(app, agent, .grok);
             try startRemoteRevocation(app, &revocation, local.kept);
+        }
+
+        fn logoutClaude(app: *App, agent: *AppAgent) !void {
+            const outcome = claude_oauth.logoutLocally() catch {
+                try writeAuthNotice(app, .{ .topic = "auth", .tone = .@"error", .body = "Could not durably sign out of Claude. The current source is unchanged." });
+                return;
+            };
+            const changed = if (comptime @hasDecl(@TypeOf(app.auth), "reconcileAfterClaudeLogout"))
+                try app.auth.reconcileAfterClaudeLogout(app.alloc)
+            else
+                false;
+            applyCredentialChange(app, changed);
+            try writeAuthNotice(app, switch (outcome) {
+                .deleted => .{ .topic = "auth", .tone = .neutral, .body = "Signed out of Claude on this device." },
+                .missing => .{ .topic = "auth", .tone = .neutral, .body = "No Claude login session found." },
+                .deleted_not_durable => .{ .topic = "auth", .tone = .warning, .body = "Signed out of Claude, but could not confirm the profile directory update." },
+            });
+            try reconcileSubscriptionLogout(app, agent, .claude);
         }
 
         /// Signs out of fx login locally, then revokes the session at the
@@ -747,6 +770,7 @@ pub fn Runtime(comptime App: type) type {
                     .login => try beginSignIn(app, agent, true),
                     .chatgpt_login => try beginChatGptSignIn(app, agent),
                     .grok_login => try beginGrokSignIn(app, agent),
+                    .claude_login => try beginClaudeSignIn(app, agent),
                     .setup => {
                         if (comptime !runtime_profile.allows(App, .native_auth)) {
                             try app.writeDomainNotice(.{
@@ -890,6 +914,10 @@ pub fn Runtime(comptime App: type) type {
                         },
                         .grok => {
                             try finishSubscriptionSignIn(app, agent, .grok);
+                            return;
+                        },
+                        .claude => {
+                            try finishSubscriptionSignIn(app, agent, .claude);
                             return;
                         },
                     }
@@ -1102,7 +1130,7 @@ pub fn Runtime(comptime App: type) type {
         fn rememberCredentialSource(app: *App, source: credentials.Source) void {
             // ChatGPT is selected by model route, not as a global Gateway
             // credential preference. Its saved session coexists independently.
-            if (source == .chatgpt_subscription or source == .grok_subscription) return;
+            if (source == .chatgpt_subscription or source == .grok_subscription or source == .claude_subscription) return;
             if (comptime @hasDecl(App, "persistCredentialSourcePreference")) {
                 app.persistCredentialSourcePreference(source);
                 return;
@@ -1191,6 +1219,40 @@ pub fn Runtime(comptime App: type) type {
             }
         }
 
+        fn beginClaudeSignIn(app: *App, agent: *AppAgent) !void {
+            if (comptime provider_runtime.supported(App)) {
+                if (!renewsWaitingRequest(app, agent, .claude)) {
+                    const decision = decideProviderSwitch(.{
+                        .current = provider_runtime.providerOf(app, agent),
+                        .target = .claude,
+                        .target_credential_ready = false,
+                        .intent = .post_oauth,
+                        .stream_active = agent.stream.active,
+                        .queued_prompts = agent.worker.queuedPromptCount(),
+                    });
+                    if (decision == .busy) {
+                        try app.writeDomainNotice(.{
+                            .topic = "auth",
+                            .tone = .warning,
+                            .body = "Claude sign-in is unavailable until active and queued work finishes.",
+                        }, true);
+                        return;
+                    }
+                }
+            }
+            try app.flushBeforeBlockingExternalWork();
+            const started = app.auth.openClaudeSignInPickerFromRoot(app.alloc);
+            if (started catch |err| {
+                cancelPromptRetryAfterAuth(app, agent);
+                debug_trace.logf("auth", "Claude login failed err={s}", .{@errorName(err)});
+                try writeLoginError(app, .claude_subscription, err);
+                return;
+            }) {
+                app.shell.render_requests.request(.footer);
+                if (io_mod.getenv("FX_NO_OPEN_BROWSER") == null) try openSignInBrowser(app);
+            }
+        }
+
         fn beginCodexSignInForProviderSwitch(app: *App) !void {
             try app.flushBeforeBlockingExternalWork();
             const started = app.auth.openChatGptSignInPickerForProviderSwitch(app.alloc);
@@ -1210,6 +1272,19 @@ pub fn Runtime(comptime App: type) type {
             if (started catch |err| {
                 debug_trace.logf("auth", "Grok login failed err={s}", .{@errorName(err)});
                 try writeLoginError(app, .grok_subscription, err);
+                return;
+            }) {
+                app.shell.render_requests.request(.footer);
+                if (io_mod.getenv("FX_NO_OPEN_BROWSER") == null) try openSignInBrowser(app);
+            }
+        }
+
+        fn beginClaudeSignInForProviderSwitch(app: *App) !void {
+            try app.flushBeforeBlockingExternalWork();
+            const started = app.auth.openClaudeSignInPickerForProviderSwitch(app.alloc);
+            if (started catch |err| {
+                debug_trace.logf("auth", "Claude login failed err={s}", .{@errorName(err)});
+                try writeLoginError(app, .claude_subscription, err);
                 return;
             }) {
                 app.shell.render_requests.request(.footer);
@@ -1429,6 +1504,7 @@ pub fn Runtime(comptime App: type) type {
                     switch (target) {
                         .codex => try beginCodexSignInForProviderSwitch(app),
                         .grok => try beginGrokSignInForProviderSwitch(app),
+                        .claude => try beginClaudeSignInForProviderSwitch(app),
                         .gateway, .configured => {},
                     }
                 }
@@ -1436,7 +1512,7 @@ pub fn Runtime(comptime App: type) type {
                     try app.writeDomainNotice(.{
                         .topic = "provider",
                         .tone = .warning,
-                        .body = if (intent == .post_oauth) "Subscription sign-in completed, but its saved credential is unavailable. The current provider is unchanged." else if (target == .codex) "Run fx login codex, then try switching again." else if (target == .grok) "Run fx login grok, then try switching again." else credentials.missing_interactive_credential_message,
+                        .body = if (intent == .post_oauth) "Subscription sign-in completed, but its saved credential is unavailable. The current provider is unchanged." else if (target == .codex) "Run fx login codex, then try switching again." else if (target == .grok) "Run fx login grok, then try switching again." else if (target == .claude) "Run fx login claude, then try switching again." else credentials.missing_interactive_credential_message,
                     }, true);
                 }
                 return false;
@@ -2196,6 +2272,7 @@ pub fn Runtime(comptime App: type) type {
                 .fx_login => try beginSignIn(app, agent, false),
                 .chatgpt_subscription => try beginChatGptSignIn(app, agent),
                 .grok_subscription => try beginGrokSignIn(app, agent),
+                .claude_subscription => try beginClaudeSignIn(app, agent),
                 .vercel_oidc_token,
                 .ai_gateway_api_key,
                 .stored_key,
@@ -2256,6 +2333,7 @@ pub fn Runtime(comptime App: type) type {
                 .fx_login => try beginSignIn(app, agent, false),
                 .chatgpt_subscription => try beginChatGptSignIn(app, agent),
                 .grok_subscription => try beginGrokSignIn(app, agent),
+                .claude_subscription => try beginClaudeSignIn(app, agent),
                 .vercel_oidc_token, .ai_gateway_api_key, .stored_key, .host_managed, .configured => {},
             }
         }
@@ -2403,6 +2481,8 @@ pub fn Runtime(comptime App: type) type {
                     error.GrokLoginTimedOut, error.LoginTimedOut => .{ .topic = "auth", .tone = .warning, .body = "Grok sign-in expired. The current credential is unchanged; run /login to try again." },
                     else => .{ .topic = "auth", .tone = .@"error", .body = "Grok sign-in failed. The current credential is unchanged." },
                 }
+            else if (source == .claude_subscription)
+                .{ .topic = "auth", .tone = .@"error", .body = "Claude sign-in failed. The current credential is unchanged." }
             else switch (err) {
                 error.ClientIdMissing => .{ .topic = "auth", .tone = .@"error", .body = "fx login is not configured yet. The current credential is unchanged." },
                 error.AccessDenied => .{ .topic = "auth", .tone = .@"error", .body = "Vercel sign-in was denied. The current credential is unchanged." },
@@ -2568,6 +2648,11 @@ const BusySignInAuth = struct {
         return true;
     }
 
+    fn openClaudeSignInPickerFromRoot(self: *BusySignInAuth, _: std.mem.Allocator) !bool {
+        self.start_count += 1;
+        return true;
+    }
+
     fn signInBrowserUrlAlloc(_: *BusySignInAuth, _: std.mem.Allocator) !?[]u8 {
         return null;
     }
@@ -2625,7 +2710,7 @@ test "interactive subscription sign-in rejects active and queued work before OAu
     };
 
     for (cases) |case| {
-        inline for ([_]model_provider.ProviderId{ .codex, .grok }) |provider| {
+        inline for ([_]model_provider.ProviderId{ .codex, .grok, .claude }) |provider| {
             var app: BusySignInApp = .{};
             defer app.deinit();
             app.agent().stream.active = case.stream_active;
@@ -2634,6 +2719,7 @@ test "interactive subscription sign-in rejects active and queued work before OAu
             switch (provider) {
                 .codex => try Runtime(BusySignInApp).beginChatGptSignIn(&app, (&app).agent()),
                 .grok => try Runtime(BusySignInApp).beginGrokSignIn(&app, (&app).agent()),
+                .claude => try Runtime(BusySignInApp).beginClaudeSignIn(&app, (&app).agent()),
                 .gateway, .configured => unreachable,
             }
 
@@ -2799,6 +2885,10 @@ const TestAuth = struct {
     }
 
     fn openGrokSignInPickerFromRoot(self: *TestAuth, alloc: std.mem.Allocator) !bool {
+        return self.openSignInPicker(alloc);
+    }
+
+    fn openClaudeSignInPickerFromRoot(self: *TestAuth, alloc: std.mem.Allocator) !bool {
         return self.openSignInPicker(alloc);
     }
 

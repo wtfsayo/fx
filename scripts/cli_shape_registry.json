@@ -169,6 +169,26 @@
       "job": "test",
       "stability": "internal"
     },
+    "FX_TEST_CLAUDE_AUTHORIZE_URL": {
+      "job": "test",
+      "stability": "internal"
+    },
+    "FX_TEST_CLAUDE_MESSAGES_URL": {
+      "job": "test",
+      "stability": "internal"
+    },
+    "FX_TEST_CLAUDE_MODELS_URL": {
+      "job": "test",
+      "stability": "internal"
+    },
+    "FX_TEST_CLAUDE_TOKEN_URL": {
+      "job": "test",
+      "stability": "internal"
+    },
+    "FX_TEST_CLAUDE_USERINFO_URL": {
+      "job": "test",
+      "stability": "internal"
+    },
     "FX_TEST_COMMAND_INDETERMINATE_AFTER_EXIT": {
       "job": "test",
       "stability": "internal"

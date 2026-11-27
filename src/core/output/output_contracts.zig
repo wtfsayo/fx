@@ -1424,6 +1424,7 @@ pub const ModelListSnapshot = struct {
             .gateway => "gateway",
             .codex => provider_catalog.label(.codex),
             .grok => provider_catalog.label(.grok),
+            .claude => provider_catalog.label(.claude),
             .configured => "configured provider",
         };
     }
@@ -1441,6 +1442,7 @@ pub const ModelListSnapshot = struct {
             .authenticated_credential_rejected => "Your Gateway credential was rejected; using the public model catalog.",
             .chatgpt_subscription => "Codex models require an authenticated Codex catalog.",
             .grok_subscription => "Grok models require an authenticated Grok catalog.",
+            .claude_subscription => "Claude models require an authenticated Claude catalog.",
         };
     }
 };

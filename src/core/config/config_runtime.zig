@@ -336,6 +336,7 @@ pub fn modelEnvOverride() ?[]const u8 {
 pub const ModelSelectionError = error{
     CodexModelNotSelected,
     GrokModelNotSelected,
+    ClaudeModelNotSelected,
     ConfiguredModelNotSelected,
 };
 
@@ -354,6 +355,7 @@ pub fn selectProviderModel(
         .gateway => default_model,
         .codex => run_model orelse return error.CodexModelNotSelected,
         .grok => run_model orelse return error.GrokModelNotSelected,
+        .claude => run_model orelse return error.ClaudeModelNotSelected,
         .configured => run_model orelse return error.ConfiguredModelNotSelected,
     };
     return .{ .provider = provider, .model = model };
@@ -373,6 +375,7 @@ pub fn modelNotSelectedMessage(err: anyerror) ?[]const u8 {
     const for_this_run = "or set a model for this run with --model or FX_MODEL";
     return switch (err) {
         error.CodexModelNotSelected => "no Codex model is selected; run `fx provider codex` to choose one, " ++ for_this_run,
+        error.ClaudeModelNotSelected => "no Claude model is selected; run `fx provider claude` to choose one, " ++ for_this_run,
         error.GrokModelNotSelected => "no Grok model is selected; run `fx provider grok` to choose one, " ++ for_this_run,
         error.ConfiguredModelNotSelected => profile_paths.displayText("no model is selected for this connection; save one under \"models\" in ~/.fx/settings.json, " ++ for_this_run),
         else => null,

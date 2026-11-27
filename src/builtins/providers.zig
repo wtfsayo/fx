@@ -10,6 +10,10 @@ const provider_catalog = @import("../core/auth/provider_catalog.zig");
 const chat_completions = @import("../gateway/chat_completions.zig");
 const configured_provider = @import("../core/config/configured_provider.zig");
 
+const anthropic_claude = @import("../gateway/anthropic_claude.zig");
+const anthropic_claude_models = @import("../gateway/anthropic_claude_models.zig");
+const anthropic_claude_permission_reviewer = @import("../gateway/anthropic_claude_permission_reviewer.zig");
+
 fn configuredBundle(_: ?*anyopaque, definition: *const configured_provider.Definition) provider_set.Bundle {
     return chat_completions.bundle(definition);
 }
@@ -26,6 +30,14 @@ pub const native = provider_set.Set{
         .cli_model_catalog = openai_codex_models.cli_model_catalog_provider,
         .model_catalog = openai_codex_models.model_catalog_provider,
         .permission_reviewer = openai_codex_permission_reviewer.provider,
+    },
+    .claude = .{
+        .presentation = provider_catalog.find(.claude),
+        .auth_strategy = .claude,
+        .agent_stream = anthropic_claude.agent_stream_provider,
+        .cli_model_catalog = anthropic_claude_models.cli_model_catalog_provider,
+        .model_catalog = anthropic_claude_models.model_catalog_provider,
+        .permission_reviewer = anthropic_claude_permission_reviewer.provider,
     },
     .grok = .{
         .presentation = provider_catalog.find(.grok),

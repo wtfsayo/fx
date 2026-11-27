@@ -42,6 +42,15 @@ pub const entries = [_]Entry{
         .subscription = true,
         .login_source = .grok_subscription,
     },
+    .{
+        .id = .claude,
+        .slug = "claude",
+        .name = "Claude",
+        .route_name = "Claude subscription",
+        .description = "Anthropic Claude subscription",
+        .subscription = true,
+        .login_source = .claude_subscription,
+    },
 };
 
 pub fn parse(value: []const u8) ?model_provider.ProviderId {

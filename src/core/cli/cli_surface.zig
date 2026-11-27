@@ -5,6 +5,7 @@ const terminal_env = @import("../shared/terminal_env.zig");
 const app_lifecycle = @import("../app/app_lifecycle.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const chatgpt_oauth = @import("../auth/chatgpt_oauth.zig");
+const claude_oauth = @import("../auth/claude_oauth.zig");
 const grok_oauth = @import("../auth/grok_oauth.zig");
 const acp_runner = @import("acp_runner.zig");
 const cli_ask = @import("cli_ask.zig");
@@ -310,7 +311,7 @@ const LoginArgs = struct {
 const LoginFlag = enum { api_key };
 const login_flag_ids = cli_flags.idTable(LoginFlag, &builtin_commands.login_options);
 
-/// `fx login [vercel|codex|grok] [--api-key]`, in either order.
+/// `fx login [vercel|codex|grok|claude] [--api-key]`, in either order.
 fn parseLoginArgs(rest: []const [:0]const u8) error{ InvalidLoginProviderArgs, ApiKeyNeedsVercel }!LoginArgs {
     var parsed: LoginArgs = .{};
     var provider_arg: ?[]const u8 = null;
@@ -1322,6 +1323,7 @@ fn runProviderLogin(alloc: Allocator, cfg: Config, provider: model_provider.Prov
         .gateway => try login_flow.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
         .codex => try chatgpt_oauth.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
         .grok => try grok_oauth.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
+        .claude => try claude_oauth.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
         .configured => return error.ConfiguredProviderUsesEnvironmentAuth,
     }
 }
@@ -1417,6 +1419,7 @@ fn activateProviderSelectionFallible(
             .gateway => "Gateway is already selected.\n",
             .codex => "Codex is already selected.\n",
             .grok => "Grok is already selected.\n",
+            .claude => "Claude is already selected.\n",
             .configured => "Configured provider is already selected.\n",
         });
         return true;
@@ -1450,6 +1453,7 @@ fn activateProviderSelectionFallible(
             switch (target) {
                 .codex => "Codex credential is unavailable",
                 .grok => "Grok credential is unavailable",
+                .claude => "Claude credential is unavailable",
                 .gateway => "configure a Gateway credential first",
                 .configured => "configure the provider auth environment variable first",
             },
@@ -1460,6 +1464,7 @@ fn activateProviderSelectionFallible(
         try writeProviderActivationError(alloc, deps, caller, switch (target) {
             .codex => "Codex model catalog is unavailable",
             .grok => "Grok model catalog is unavailable",
+            .claude => "Claude model catalog is unavailable",
             .gateway => "Gateway model catalog is unavailable",
             .configured => "Configured model catalog is unavailable",
         });
@@ -1594,6 +1599,7 @@ fn activateProviderSelectionFallible(
     if (performed_login) |provider| switch (provider) {
         .codex => try writeStdout(deps, "Signed in with Codex.\n"),
         .grok => try writeStdout(deps, "Signed in with Grok.\n"),
+        .claude => try writeStdout(deps, "Signed in with Claude.\n"),
         .gateway, .configured => unreachable,
     };
     if (caller == .provider_command) {
@@ -1601,6 +1607,7 @@ fn activateProviderSelectionFallible(
             .gateway => "Provider set to Gateway.\n",
             .codex => "Provider set to Codex.\n",
             .grok => "Provider set to Grok.\n",
+            .claude => "Provider set to Claude.\n",
             .configured => "Provider set to configured connection.\n",
         });
     }
@@ -1792,7 +1799,7 @@ fn runNonInteractiveWithDeps(
                     error.ApiKeyNeedsVercel => try writeStderr(deps, "fx login: --api-key works only with vercel\n"),
                     error.InvalidLoginProviderArgs => {
                         try writeFlagFailure(alloc, deps, .login, rest);
-                        try writeStderr(deps, "usage: fx login [vercel|codex|grok] [--api-key]\n");
+                        try writeStderr(deps, "usage: fx login [vercel|codex|grok|claude] [--api-key]\n");
                     },
                 }
                 return usage_failure;
@@ -1835,13 +1842,14 @@ fn runNonInteractiveWithDeps(
                 },
                 .codex => try writeStdout(deps, "Signed in with Codex.\n"),
                 .grok => try writeStdout(deps, "Signed in with Grok.\n"),
+                .claude => try writeStdout(deps, "Signed in with Claude.\n"),
                 .configured => try writeStdout(deps, "Configured providers use settings.json authentication.\n"),
             }
             return .handled_success;
         },
         .logout => |rest| {
             const maybe_login_provider = parseLoginProvider(rest) catch {
-                try writeStderr(deps, "usage: fx logout [vercel|codex|grok]\n");
+                try writeStderr(deps, "usage: fx logout [vercel|codex|grok|claude]\n");
                 return usage_failure;
             };
             if (cfg.auth_mode == .host_managed) {
@@ -1876,6 +1884,26 @@ fn runNonInteractiveWithDeps(
                     },
                     .deleted_not_durable => result: {
                         try writeStderr(deps, "fx logout: failed to durably remove saved Codex login\n");
+                        break :result .handled_failure;
+                    },
+                };
+            }
+            if (login_provider == .claude) {
+                const outcome = claude_oauth.logoutLocally() catch {
+                    try writeStderr(deps, "fx logout: failed to durably remove saved Claude login\n");
+                    return .handled_failure;
+                };
+                return switch (outcome) {
+                    .deleted => result: {
+                        try writeStdout(deps, "Signed out of Claude on this device.\n");
+                        break :result .handled_success;
+                    },
+                    .missing => result: {
+                        try writeStdout(deps, "No Claude login session found.\n");
+                        break :result .handled_success;
+                    },
+                    .deleted_not_durable => result: {
+                        try writeStderr(deps, "fx logout: failed to durably remove saved Claude login\n");
                         break :result .handled_failure;
                     },
                 };
@@ -2005,7 +2033,7 @@ fn runNonInteractiveWithDeps(
                 return usage_failure;
             }
             const target = model_provider.parse(rest[0]) orelse {
-                try writeStderr(deps, "fx provider: expected gateway, codex, grok, or a configured name\n");
+                try writeStderr(deps, "fx provider: expected gateway, codex, grok, claude, or a configured name\n");
                 return usage_failure;
             };
             const activated = activateProviderSelection(alloc, cfg, deps, target, .provider_command, null, null) catch |err| switch (err) {
@@ -2145,6 +2173,7 @@ fn runNonInteractiveWithDeps(
                     .gateway => "fx models: Gateway model catalog is unavailable\n",
                     .codex => "fx models: Codex model catalog is unavailable\n",
                     .grok => "fx models: Grok model catalog is unavailable\n",
+                    .claude => "fx models: Claude model catalog is unavailable\n",
                     .configured => "fx models: Configured model catalog is unavailable\n",
                 });
                 return .handled_failure;
@@ -4348,7 +4377,7 @@ fn globalLaunchErrorMessage(err: anyerror) ?[]const u8 {
         error.InvalidProfileName => "--profile names use lowercase letters, digits, '-', or '_'",
         error.InvalidInstancesValue => "--instances takes a whole number of at least 1",
         error.InvalidEffortValue => "--effort value is not a valid reasoning effort",
-        error.InvalidProviderValue => "--provider accepts gateway, codex, grok, or a configured provider name",
+        error.InvalidProviderValue => "--provider accepts gateway, codex, grok, claude, or a configured provider name",
         error.InvalidProviderOrderValue => "--provider-order accepts comma-separated provider slugs (letters, digits, '-')",
         error.InvalidPermissionModeValue => "--permission-mode accepts ask, auto, or full-access",
         error.InvalidToolPlacementOverride => "--tool-placement takes <tool>=toolbox or <tool>=direct",

@@ -613,6 +613,7 @@ fn loadedCatalogStatusText(state: model_cache_runtime.ModelMenuCatalogState) ?[]
             .authenticated_credential_rejected => "Your Gateway credential was rejected; using the public model catalog.",
             .chatgpt_subscription => "Codex models require an authenticated Codex catalog.",
             .grok_subscription => "Grok models require an authenticated Grok catalog.",
+            .claude_subscription => "Claude models require an authenticated Claude catalog.",
         };
     }
     if (state.access_level == .authenticated) {
@@ -624,6 +625,7 @@ fn loadedCatalogStatusText(state: model_cache_runtime.ModelMenuCatalogState) ?[]
             .stored_key => "Gateway catalog: authenticated with the stored API key.",
             .chatgpt_subscription => "Codex catalog: authenticated with a subscription.",
             .grok_subscription => "Grok catalog: authenticated with a subscription.",
+            .claude_subscription => "Claude catalog: authenticated with a subscription.",
             .host_managed => "Provider catalog: authentication is managed by the host.",
             .configured => "Provider catalog: models from profile settings.",
         };

@@ -15,6 +15,7 @@ pub const Bundle = struct {
         vercel,
         chatgpt,
         grok,
+        claude,
     };
     pub const Capabilities = struct {
         gateway_prompt_caching: bool = false,
@@ -59,6 +60,7 @@ pub const Set = struct {
     gateway: Bundle,
     codex: Bundle,
     grok: Bundle,
+    claude: Bundle = .{},
     definitions: []const @import("../config/configured_provider.zig").Definition = &.{},
     /// Builds a configured provider's bundle; `configured_context` is passed through.
     configured_fn: ?*const fn (?*anyopaque, *const @import("../config/configured_provider.zig").Definition) Bundle = null,
@@ -69,6 +71,7 @@ pub const Set = struct {
             .gateway => self.gateway,
             .codex => self.codex,
             .grok => self.grok,
+            .claude => self.claude,
             .configured => blk: {
                 const factory = self.configured_fn orelse break :blk .{};
                 const registry = @import("../config/configured_provider.zig").Registry{ .definitions = self.definitions };

@@ -74,6 +74,7 @@ test {
     _ = @import("gateway/chat_completions_protocol.zig");
     _ = @import("gateway/client.zig");
     _ = @import("gateway/openai_codex.zig");
+    _ = @import("gateway/anthropic_claude_models.zig");
     _ = @import("gateway/responses_protocol.zig");
     _ = @import("gateway/sse.zig");
     _ = @import("gateway/tool_call_ids.zig");

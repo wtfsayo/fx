@@ -110,7 +110,7 @@ pub fn parseMethod(value: []const u8) ?Method {
 }
 
 fn providerVisible(id: model_provider.ProviderId) bool {
-    if (comptime host_target.is_wasm) return id != .grok;
+    if (comptime host_target.is_wasm) return id != .grok and id != .claude;
     return true;
 }
 
@@ -128,7 +128,7 @@ pub fn providerOptions(out: *[max_provider_options][]const u8) usize {
 pub fn providerMethods(id: model_provider.ProviderId) []const Method {
     return switch (id) {
         .gateway => &.{ .oauth, .api_key },
-        .codex, .grok, .configured => &.{},
+        .codex, .grok, .claude, .configured => &.{},
     };
 }
 
@@ -157,6 +157,7 @@ test "only the gateway offers a method column" {
     try std.testing.expectEqual(@as(usize, 2), providerMethods(.gateway).len);
     try std.testing.expectEqual(@as(usize, 0), providerMethods(.codex).len);
     try std.testing.expectEqual(@as(usize, 0), providerMethods(.grok).len);
+    try std.testing.expectEqual(@as(usize, 0), providerMethods(.claude).len);
 }
 
 test "method slugs round trip and stay single tokens" {

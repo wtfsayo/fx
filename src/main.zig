@@ -5768,6 +5768,12 @@ test {
     _ = @import("core/gateway/provider_versions.zig");
     _ = @import("gateway/xai_grok.zig");
     _ = @import("gateway/xai_grok_permission_reviewer.zig");
+    _ = @import("core/auth/claude_oauth.zig");
+    _ = @import("core/auth/claude_session.zig");
+    _ = @import("gateway/anthropic_claude.zig");
+    _ = @import("gateway/anthropic_claude_models.zig");
+    _ = @import("gateway/anthropic_claude_permission_reviewer.zig");
+    _ = @import("gateway/claude_code_protocol.zig");
     _ = credentials;
     _ = @import("core/auth/oauth.zig");
     _ = @import("core/auth/oauth_session.zig");

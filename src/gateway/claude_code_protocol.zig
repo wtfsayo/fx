@@ -11,7 +11,7 @@ const hex = "0123456789abcdef";
 const Value = std.json.Value;
 const Allocator = std.mem.Allocator;
 
-/// Returns an owned copy with the two SDK system blocks. User messages and tools are unchanged.
+/// Returns an owned request with SDK system blocks and ephemeral cache breakpoints.
 pub fn prepare(alloc: Allocator, payload: []const u8) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -30,8 +30,44 @@ pub fn prepare(alloc: Allocator, payload: []const u8) ![]u8 {
     } else {
         try system.append(try textBlock(scratch, "You are a helpful assistant."));
     }
+    try markCacheBreakpoint(scratch, &system.items[system.items.len - 1]);
     try body.object.put(scratch, "system", .{ .array = system });
+    if (body.object.getPtr("tools")) |tools| {
+        if (lastBlock(tools)) |tool| try markCacheBreakpoint(scratch, tool);
+    }
+    if (body.object.getPtr("messages")) |messages| {
+        if (lastBlock(messages)) |message| {
+            if (strEqual(message.object.get("role"), "user")) {
+                if (message.object.getPtr("content")) |content| {
+                    if (content.* == .string) {
+                        var blocks = std.json.Array.init(scratch);
+                        try blocks.append(try textBlock(scratch, content.string));
+                        content.* = .{ .array = blocks };
+                    }
+                    if (lastBlock(content)) |block| {
+                        const kind = block.object.get("type");
+                        if (strEqual(kind, "text") or strEqual(kind, "image") or strEqual(kind, "tool_result")) {
+                            try markCacheBreakpoint(scratch, block);
+                        }
+                    }
+                }
+            }
+        }
+    }
     return serializeAttested(alloc, scratch, &body);
+}
+
+fn lastBlock(value: *Value) ?*Value {
+    if (value.* != .array or value.array.items.len == 0) return null;
+    const last = &value.array.items[value.array.items.len - 1];
+    return if (last.* == .object) last else null;
+}
+
+fn markCacheBreakpoint(alloc: Allocator, block: *Value) !void {
+    if (block.* != .object) return error.InvalidClaudeWireRequest;
+    var control: std.json.ObjectMap = .{};
+    try control.put(alloc, "type", .{ .string = "ephemeral" });
+    try block.object.put(alloc, "cache_control", .{ .object = control });
 }
 
 fn textBlock(alloc: Allocator, text: []const u8) !Value {
@@ -155,6 +191,35 @@ test "Claude SDK wire preparation preserves fx instructions and user placeholder
     try std.testing.expectEqualStrings("Keep fx permissions.", blocks[2].object.get("text").?.string);
     try std.testing.expect(std.mem.find(u8, body, "hello cch=00000") != null);
     try std.testing.expect(object.get("thinking") == null);
+}
+
+test "Claude cache breakpoints cover tools, stable instructions, and the newest tool result" {
+    const alloc = std.testing.allocator;
+    const fixture =
+        \\{"model":"claude-fable-5-2","max_tokens":8192,"system":"Stable instructions",
+        \\ "tools":[{"name":"first"},{"name":"last"}],
+        \\ "messages":[{"role":"user","content":[{"type":"text","text":"First prompt"}]},
+        \\ {"role":"assistant","content":[{"type":"tool_use","id":"call","name":"last","input":{}}]},
+        \\ {"role":"user","content":[{"type":"tool_result","tool_use_id":"call","content":"Result"}]}]}
+    ;
+    const body = try prepare(alloc, fixture);
+    defer alloc.free(body);
+    var parsed = try std.json.parseFromSlice(Value, alloc, body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, body, "\"cache_control\":{\"type\":\"ephemeral\"}"));
+    const object = parsed.value.object;
+    const tools = object.get("tools").?.array.items;
+    try std.testing.expect(!tools[0].object.contains("cache_control"));
+    try std.testing.expect(tools[1].object.contains("cache_control"));
+    const system = object.get("system").?.array.items;
+    try std.testing.expect(!system[0].object.contains("cache_control"));
+    try std.testing.expect(!system[1].object.contains("cache_control"));
+    try std.testing.expect(system[2].object.contains("cache_control"));
+    const messages = object.get("messages").?.array.items;
+    try std.testing.expect(!messages[0].object.get("content").?.array.items[0].object.contains("cache_control"));
+    const result = messages[2].object.get("content").?.array.items[0];
+    try std.testing.expect(result.object.contains("cache_control"));
+    try std.testing.expectEqualStrings("Result", result.object.get("content").?.string);
 }
 
 test "request UUID formats the supplied seed" {

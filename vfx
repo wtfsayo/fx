@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+export FX_AUTO_UPGRADE=0
+if [ "${1-}" = --direct ]; then
+  shift
+fi
+case "${1-}" in
+  upgrade|update) printf "%s\n" "vfx: rebuild this local checkout to update it." >&2; exit 2 ;;
+esac
+exec "$root/zig-out/bin/fx" "$@"

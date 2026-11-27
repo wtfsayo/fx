@@ -309,7 +309,7 @@ fn selectProjectContext(alloc: Allocator, options: SelectionOptions) context_con
                     break :blk null;
                 };
                 if (canonical_home) |home_root| {
-                    global_source_path = try std.fs.path.join(arena, &.{ home_root, ".fx", "AGENTS.md" });
+                    global_source_path = try std.fs.path.join(arena, &.{ home_root, @import("../core/shared/profile_paths.zig").root_dir_name, "AGENTS.md" });
                     global_rule = try loadRuleForSelection(arena, &scratch, global_source_path.?, options.context_limits.project_instruction_file_bytes);
                     if (pathing.pathInside(home_root, options.workspace_root)) {
                         try collectLaunchAncestorCandidates(arena, &scratch, home_root, options.workspace_root, options.delivered_sources);
@@ -1054,7 +1054,7 @@ test "project instruction file cap keeps a line-safe prefix and reports source f
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try writeTestFile(tmp.dir, "home/.fx/AGENTS.md", "GLOBAL-ONE\nGLOBAL-TWO\n");
+    try writeTestFile(tmp.dir, "home/.vfx/AGENTS.md", "GLOBAL-ONE\nGLOBAL-TWO\n");
     try writeTestFile(tmp.dir, "home/work/AGENTS.md", "PROJECT-ONE\nPROJECT-TWO\n");
     const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
     defer alloc.free(home);
@@ -1310,7 +1310,7 @@ test "initial gather orders global ancestors workspace and exact hidden and buil
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try writeTestFile(tmp.dir, "home/.fx/AGENTS.md", "RULE_GLOBAL");
+    try writeTestFile(tmp.dir, "home/.vfx/AGENTS.md", "RULE_GLOBAL");
     try writeTestFile(tmp.dir, "home/projects/AGENTS.md", "RULE_PARENT");
     try writeTestFile(tmp.dir, "home/projects/work/AGENTS.md", "RULE_WORKSPACE");
     try writeTestFile(tmp.dir, "home/projects/work/.github/AGENTS.md", "RULE_HIDDEN");
@@ -1358,10 +1358,10 @@ test "initial gather renders an identical global and workspace source once" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try writeTestFile(tmp.dir, "home/.fx/AGENTS.md", "RULE_SHARED_GLOBAL_AND_WORKSPACE");
+    try writeTestFile(tmp.dir, "home/.vfx/AGENTS.md", "RULE_SHARED_GLOBAL_AND_WORKSPACE");
     const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
     defer alloc.free(home);
-    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home/.fx");
+    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home/.vfx");
     defer alloc.free(workspace);
 
     var context = try gatherProjectContextWithHome(alloc, .{

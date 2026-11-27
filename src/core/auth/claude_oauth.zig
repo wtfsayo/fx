@@ -15,7 +15,8 @@ const Allocator = std.mem.Allocator;
 const client_id = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const issuer_url = "https://claude.ai";
 const authorize_url = "https://claude.ai/oauth/authorize";
-const token_url = "https://console.anthropic.com/v1/oauth/token";
+const token_url = "https://api.anthropic.com/v1/oauth/token";
+const refresh_url = "https://platform.claude.com/v1/oauth/token";
 const userinfo_url = "https://api.anthropic.com/api/oauth/profile";
 pub const anthropic_api_version = "2023-06-01";
 pub const oauth_beta = "oauth-2025-04-20";
@@ -31,7 +32,9 @@ const e2e_authorize_url_env = "FX_E2E_CLAUDE_AUTHORIZE_URL";
 const e2e_token_url_env = "FX_E2E_CLAUDE_TOKEN_URL";
 const e2e_userinfo_url_env = "FX_E2E_CLAUDE_USERINFO_URL";
 const browser_scope = "user:profile user:inference user:sessions:claude_code user:mcp_servers";
-const browser_redirect_uri = "https://console.anthropic.com/oauth/code/callback";
+const browser_callback_port: u16 = 54545;
+const browser_callback_path = "/callback";
+const browser_redirect_uri = "http://localhost:54545" ++ browser_callback_path;
 const browser_login_timeout_seconds: i64 = 5 * 60;
 const browser_callback_poll_ms: i32 = 100;
 const browser_callback_io_timeout_seconds: i64 = 30;
@@ -67,7 +70,7 @@ const TokenSet = struct {
 };
 
 const BrowserLoginContext = struct {
-    listener: std.Io.net.Server,
+    listeners: BrowserListeners,
     redirect_uri: []u8,
     code_verifier: []u8,
     state: []u8,
@@ -76,7 +79,7 @@ const BrowserLoginContext = struct {
     pasted_code: ?[]u8 = null,
 
     fn deinit(self: *BrowserLoginContext, alloc: Allocator) void {
-        self.listener.deinit(io_mod.getIo());
+        self.listeners.deinit();
         alloc.free(self.redirect_uri);
         secret.zeroAndFree(alloc, self.code_verifier);
         secret.zeroAndFree(alloc, self.state);
@@ -135,18 +138,12 @@ fn prepareBrowserSignIn(alloc: Allocator, transport: oauth_transport.Provider) !
     const configured_token_endpoint = try configuredEndpoint(alloc, e2e_token_url_env, token_url);
     errdefer alloc.free(configured_token_endpoint);
 
-    var listener = try bindBrowserCallback();
-    var listener_owned = true;
-    errdefer if (listener_owned) listener.deinit(io_mod.getIo());
-    const e2e = io_mod.getenv(e2e_authorize_url_env) != null;
-    const redirect_uri = if (e2e)
-        try std.fmt.allocPrint(
-            alloc,
-            "http://127.0.0.1:{d}/callback",
-            .{listener.socket.address.getPort()},
-        )
-    else
-        try alloc.dupe(u8, browser_redirect_uri);
+    var listeners = bindBrowserCallback(browser_callback_port) catch |err| switch (err) {
+        error.AddressInUse => try bindBrowserCallback(0),
+        else => return err,
+    };
+    errdefer listeners.deinit();
+    const redirect_uri = try std.fmt.allocPrint(alloc, "http://localhost:{d}" ++ browser_callback_path, .{listeners.ipv4.socket.address.getPort()});
     errdefer alloc.free(redirect_uri);
     const code_verifier = try randomUrlSafeSecret(alloc);
     errdefer secret.zeroAndFree(alloc, code_verifier);
@@ -166,13 +163,12 @@ fn prepareBrowserSignIn(alloc: Allocator, transport: oauth_transport.Provider) !
     const context = try alloc.create(BrowserLoginContext);
     errdefer alloc.destroy(context);
     context.* = .{
-        .listener = listener,
+        .listeners = listeners,
         .redirect_uri = redirect_uri,
         .code_verifier = code_verifier,
         .state = state,
         .transport = transport,
     };
-    listener_owned = false;
 
     const owned_authorize = try alloc.dupe(u8, configured_authorize);
     errdefer alloc.free(owned_authorize);
@@ -211,9 +207,26 @@ fn deinitBrowserLoginContext(raw: ?*anyopaque, alloc: Allocator) void {
     alloc.destroy(context);
 }
 
-fn bindBrowserCallback() !std.Io.net.Server {
-    var address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
-    return address.listen(io_mod.getIo(), .{ .reuse_address = true });
+const BrowserListeners = struct {
+    ipv4: std.Io.net.Server,
+    ipv6: ?std.Io.net.Server,
+
+    fn deinit(self: *BrowserListeners) void {
+        if (self.ipv6) |*listener| listener.deinit(io_mod.getIo());
+        self.ipv4.deinit(io_mod.getIo());
+    }
+};
+
+fn bindBrowserCallback(port: u16) !BrowserListeners {
+    const ipv4: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    var primary = try ipv4.listen(io_mod.getIo(), .{});
+    errdefer primary.deinit(io_mod.getIo());
+    const ipv6: std.Io.net.IpAddress = .{ .ip6 = .loopback(primary.socket.address.getPort()) };
+    const companion: ?std.Io.net.Server = ipv6.listen(io_mod.getIo(), .{}) catch |err| switch (err) {
+        error.AddressFamilyUnsupported, error.AddressUnavailable, error.ProtocolUnsupportedByAddressFamily => null,
+        else => return err,
+    };
+    return .{ .ipv4 = primary, .ipv6 = companion };
 }
 
 fn randomUrlSafeSecret(alloc: Allocator) ![]u8 {
@@ -277,16 +290,20 @@ fn pollBrowserToken(
             .token_type = token_type,
         } };
     }
-    if (!try browserCallbackReady(&context.listener, cancel_flag)) return .pending;
-
-    var stream = try context.listener.accept(io_mod.getIo());
+    const listener = (try readyBrowserListener(&context.listeners, cancel_flag)) orelse return .pending;
+    var stream = try listener.accept(io_mod.getIo());
     defer stream.close(io_mod.getIo());
     setBrowserSocketTimeouts(stream.socket.handle);
-    const target = try readBrowserCallbackTarget(alloc, stream);
+    const target = readBrowserCallbackTarget(alloc, stream) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        writeBrowserCallbackResponse(stream, false) catch {};
+        return .pending;
+    };
     defer alloc.free(target);
     var callback = parseBrowserCallbackTarget(alloc, target, context.state) catch |err| {
+        if (err == error.OutOfMemory) return err;
         writeBrowserCallbackResponse(stream, false) catch {};
-        return err;
+        return .pending;
     };
     defer callback.deinit(alloc);
 
@@ -324,23 +341,24 @@ fn pollBrowserToken(
     } };
 }
 
-fn browserCallbackReady(
-    listener: *std.Io.net.Server,
+fn readyBrowserListener(
+    listeners: *BrowserListeners,
     cancel_flag: *std.atomic.Value(bool),
-) !bool {
+) !?*std.Io.net.Server {
     if (cancel_flag.load(.seq_cst)) return error.Cancelled;
-    var fds = [_]std.posix.pollfd{.{
-        .fd = listener.socket.handle,
-        .events = std.posix.POLL.IN,
-        .revents = 0,
-    }};
+    var fds: [2]std.posix.pollfd = .{
+        .{ .fd = listeners.ipv4.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = -1, .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    if (listeners.ipv6) |*listener| fds[1].fd = listener.socket.handle;
     const ready = try std.posix.poll(&fds, browser_callback_poll_ms);
     if (cancel_flag.load(.seq_cst)) return error.Cancelled;
-    if (ready == 0) return false;
-    if ((fds[0].revents & std.posix.POLL.IN) == 0) {
-        return error.InvalidClaudeOAuthCallback;
+    if (ready == 0) return null;
+    if ((fds[0].revents & std.posix.POLL.IN) != 0) return &listeners.ipv4;
+    if ((fds[1].revents & std.posix.POLL.IN) != 0) {
+        if (listeners.ipv6) |*listener| return listener;
     }
-    return true;
+    return error.InvalidClaudeOAuthCallback;
 }
 
 fn readBrowserCallbackTarget(alloc: Allocator, stream: std.Io.net.Stream) ![]u8 {
@@ -441,7 +459,7 @@ pub fn runLogin(
     defer alloc.free(authorization_url);
     try writeStdout("Open this URL to sign in with Claude:\n");
     try writeStdout(authorization_url);
-    try writeStdout("\n\nAfter you authorize, paste the code from the browser and press Enter.\n");
+    try writeStdout("\n\nComplete sign-in in your browser. If it cannot reach this terminal, paste the final URL or the authorization code and press Enter.\n");
     if (io_mod.getenv("FX_NO_OPEN_BROWSER") == null) {
         _ = url_opener.open(alloc, authorization_url) catch false;
     }
@@ -526,7 +544,6 @@ pub fn logout(alloc: Allocator, transport: oauth_transport.Provider) !LogoutResu
 }
 
 pub fn sourceExists(alloc: Allocator) !bool {
-    if (try claude_code_store.hasCredentials(alloc)) return true;
     var session = (try claude_session.load(alloc)) orelse return false;
     defer session.deinit(alloc);
     return true;
@@ -537,7 +554,6 @@ pub fn loadAccess(
     transport: oauth_transport.Provider,
     mode: RefreshMode,
 ) !?Access {
-    if (try loadClaudeCodeAccess(alloc, transport, mode)) |access| return access;
     if (mode == .stored) {
         var session = (try claude_session.load(alloc)) orelse return null;
         defer session.deinit(alloc);
@@ -553,77 +569,6 @@ pub fn loadAccess(
         try refreshSession(alloc, transport, &mutation, &session);
     }
     return takeAccess(&session);
-}
-
-fn loadClaudeCodeAccess(
-    alloc: Allocator,
-    transport: oauth_transport.Provider,
-    mode: RefreshMode,
-) !?Access {
-    var stored = (try claude_code_store.load(alloc)) orelse return null;
-    errdefer stored.deinit(alloc);
-    if (mode != .stored and (mode == .force or stored.expired(io_mod.milliTimestamp()))) {
-        refreshClaudeCodeSession(alloc, transport, &stored) catch |err| {
-            debug_trace.logf("auth", "Claude Code token refresh failed err={s}", .{@errorName(err)});
-            return null;
-        };
-        claude_code_store.save(alloc, stored) catch |err| {
-            debug_trace.logf("auth", "Claude Code token persist failed err={s}", .{@errorName(err)});
-        };
-    }
-    if (stored.account_id.len == 0 or !claude_session.validAccountId(stored.account_id)) {
-        const account_id = fetchAccountId(alloc, transport, stored.access_token) catch |err| {
-            debug_trace.logf("auth", "Claude Code account lookup failed err={s}", .{@errorName(err)});
-            return null;
-        };
-        alloc.free(stored.account_id);
-        stored.account_id = account_id;
-    }
-    if (try claude_code_store.findCli(alloc)) |cli| {
-        defer alloc.free(cli);
-        debug_trace.logf("auth", "Claude Code CLI detected", .{});
-    }
-    const access = Access{
-        .access_token = stored.access_token,
-        .account_id = stored.account_id,
-        .refresh_after_ms = claude_code_store.refreshDeadlineMs(stored.expires_at_ms),
-    };
-    secret.zeroAndFree(alloc, stored.refresh_token);
-    stored.access_token = &.{};
-    stored.refresh_token = &.{};
-    stored.account_id = &.{};
-    return access;
-}
-
-fn refreshClaudeCodeSession(
-    alloc: Allocator,
-    transport: oauth_transport.Provider,
-    stored: *claude_code_store.Stored,
-) !void {
-    const payload = try jsonObjectPayload(alloc, .{
-        .grant_type = "refresh_token",
-        .client_id = client_id,
-        .refresh_token = stored.refresh_token,
-    });
-    defer secret.zeroAndFree(alloc, payload);
-    var token = try requestRefreshToken(alloc, transport, payload);
-    defer token.deinit(alloc);
-    const access_token = token.access_token;
-    token.access_token = &.{};
-    errdefer secret.zeroAndFree(alloc, access_token);
-    const refresh_token = if (token.refresh_token) |rotated| rotated else try alloc.dupe(u8, stored.refresh_token);
-    if (token.refresh_token != null) token.refresh_token = null;
-    errdefer secret.zeroAndFree(alloc, refresh_token);
-    const expires_in = token.expires_in orelse return error.InvalidClaudeOAuthResponse;
-    const duration_ms = std.math.mul(i64, expires_in, std.time.ms_per_s) catch
-        return error.InvalidClaudeOAuthResponse;
-    const expires_at_ms = std.math.add(i64, io_mod.milliTimestamp(), duration_ms) catch
-        return error.InvalidClaudeOAuthResponse;
-    secret.zeroAndFree(alloc, stored.access_token);
-    secret.zeroAndFree(alloc, stored.refresh_token);
-    stored.access_token = access_token;
-    stored.refresh_token = refresh_token;
-    stored.expires_at_ms = expires_at_ms;
 }
 
 fn takeAccess(session: *claude_session.Session) Access {
@@ -701,7 +646,7 @@ fn requestRefreshToken(
     transport: oauth_transport.Provider,
     payload: []const u8,
 ) !RefreshTokenResponse {
-    const endpoint_url = try configuredEndpoint(alloc, e2e_token_url_env, token_url);
+    const endpoint_url = try configuredEndpoint(alloc, e2e_token_url_env, refresh_url);
     defer alloc.free(endpoint_url);
     const bytes = try requestAccepted(
         alloc,
@@ -1015,7 +960,7 @@ fn parseBrowserCallbackTarget(
     target: []const u8,
     expected_state: []const u8,
 ) !BrowserCallback {
-    const prefix = "/callback?";
+    const prefix = browser_callback_path ++ "?";
     if (!std.mem.startsWith(u8, target, prefix) or std.mem.findScalar(u8, target, '#') != null) {
         return error.InvalidClaudeOAuthCallback;
     }
@@ -1115,7 +1060,7 @@ test "Claude browser authorization URL uses PKCE against the Claude authorize en
     try std.testing.expect(std.mem.find(u8, url, "code_challenge=challenge-value") != null);
     try std.testing.expect(std.mem.find(u8, url, "code_challenge_method=S256") != null);
     try std.testing.expect(std.mem.find(u8, url, "state=state-value") != null);
-    try std.testing.expect(std.mem.find(u8, url, "redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback") != null);
+    try std.testing.expect(std.mem.find(u8, url, "redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback") != null);
     try std.testing.expect(std.mem.find(u8, url, "127.0.0.1") == null);
     // Claude Code scopes are user-scoped; the issuer rejects OpenID scopes.
     try std.testing.expect(std.mem.find(u8, url, "scope=user%3Aprofile") != null);

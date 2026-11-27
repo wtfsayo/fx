@@ -47,22 +47,21 @@ fx login grok
 fx
 ```
 
-Or, if Claude Code is already signed in on this machine, switch to that subscription:
+`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. They use their own OAuth sessions and send requests directly to OpenAI and xAI, respectively. Inside fx, use `/model` to select a model, and `/logout codex` or `/logout grok` to remove the corresponding login.
+
+For the local vfx build, sign in to Claude from this checkout:
 
 ```bash
-fx provider claude
-fx
+./vfx login claude
+./vfx models
+./vfx
 ```
 
-`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Claude uses the Claude Code login already on the machine (`~/.claude/credentials.json`); `fx login claude` remains a fallback when Claude Code is not signed in. Inside fx, open `/setup` and choose **Switch provider** to move between Gateway, Codex, Grok, and Claude. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session without affecting other providers. `/logout claude` clears only fx's own Claude session; it does not sign Claude Code out.
+The browser returns to `http://localhost:54545/callback` by default. If the port is in use, vfx chooses another local port. If the browser cannot reach the callback, paste the final URL or authorization code in the terminal. This login creates a vfx-owned session at `~/.vfx/claude-auth.json` for provider selection and the model catalog. Use `/model` to switch models.
 
-The OpenAI Codex route uses ChatGPT subscription access directly and never sends its OAuth token to Vercel AI Gateway. The session is stored privately at `~/.fx/chatgpt-auth.json` and refreshed when needed. On supported Codex models, `/fast` requests OpenAI's priority service tier and consumes ChatGPT credits at the higher Fast mode rate.
+Claude inference streams directly from Anthropic using the vfx login. The OAuth adapter follows [Pi Black's Claude Code 2.1.332 request conventions](https://github.com/paoloanzn/pi-black/tree/e9d69a34544cf7920efba7b4943afbf067a1c149). It doesn't read the Claude Code profile or change fx's tools, permissions, or thinking controls. This is an unofficial integration: Anthropic controls model eligibility and billing, and the request format may need updates when Claude Code changes.
 
-The Grok route uses subscription access directly at xAI and never sends its OAuth token to Vercel AI Gateway or OpenAI. Its session is stored privately at `~/.fx/grok-auth.json`, refreshed when needed, and used only with the authenticated xAI catalog and Responses API.
-
-The Claude route uses the Claude Code CLI Agent SDK (`claude -p --input-format stream-json --output-format stream-json --include-partial-messages`) and never sends its OAuth token to Vercel AI Gateway, OpenAI, or xAI. Chat runs as a long-lived stdio session against the local `claude` CLI so Max extra usage stays on that login. fx needs the CLI on PATH (`claude auth login`). A separate fx-owned session at `~/.fx/claude-auth.json` is used only as a fallback when Claude Code is not signed in. Catalog listing still uses the authenticated Anthropic models endpoint.
-
-Claude inference uses fx tools by default. User MCP servers from `~/.claude` are not attached. To let Claude Code keep its built-in tools, set `claude_code_tools` to `true` in `~/.fx/settings.json`, export `FX_CLAUDE_CODE_TOOLS=on`, or launch with `fx --claude-tools on`. fx `--tools` still limits the host tool set for every provider.
+Build with Zig 0.16.0 and `zig build -Doptimize=ReleaseSafe`. Run `zig test src/gateway/claude_code_protocol.zig` to check request preparation.
 
 To use an AI Gateway API key instead:
 

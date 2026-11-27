@@ -1859,7 +1859,7 @@ fn retryAfterDelayNs(head: std.http.Client.Response.Head) ?u64 {
     return @min(delay, gateway_retry_after_max_ns);
 }
 
-fn retryAfterSeconds(head: std.http.Client.Response.Head) ?u64 {
+pub fn retryAfterSeconds(head: std.http.Client.Response.Head) ?u64 {
     const raw = findHeaderValue(head, "retry-after") orelse return null;
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (trimmed.len == 0) return null;

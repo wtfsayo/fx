@@ -9,9 +9,9 @@ const Allocator = std.mem.Allocator;
 const max_credentials_bytes: usize = 64 * 1024;
 const max_claude_json_bytes: usize = 1024 * 1024;
 const expiry_skew_ms: i64 = 60 * 1000;
-const default_user_agent = "claude-cli/2.1.0 (external, cli)";
+const claude_code_version = "2.1.326";
 
-pub const user_agent = default_user_agent;
+pub const user_agent = "claude-cli/" ++ claude_code_version ++ " (external, cli)";
 pub const originator = "claude-code";
 pub const messages_beta = "oauth-2025-04-20,claude-code-20250219";
 

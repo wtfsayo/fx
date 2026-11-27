@@ -1,4 +1,5 @@
 const std = @import("std");
+const claude_code_protocol = @import("claude_code_protocol.zig");
 const claude_oauth = @import("../core/auth/claude_oauth.zig");
 const claude_session = @import("../core/auth/claude_session.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
@@ -7,10 +8,9 @@ const stream_provider = @import("../core/agent/stream_provider.zig");
 const io_mod = @import("../core/shared/io.zig");
 const types = @import("../core/shared/types.zig");
 const gateway_client = @import("client.zig");
-const anthropic_claude_cli = @import("anthropic_claude_cli.zig");
 
 const Allocator = std.mem.Allocator;
-const endpoint = "https://api.anthropic.com/v1/messages";
+const endpoint = "https://api.anthropic.com/v1/messages?beta=true";
 const generation_origin = "https://api.anthropic.com/v1";
 const e2e_endpoint_env = "FX_E2E_ANTHROPIC_CLAUDE_MESSAGES_URL";
 const anthropic_version = claude_oauth.anthropic_api_version;
@@ -66,7 +66,7 @@ pub fn buildRequest(
         try instructions.writer.writeAll(text);
     }
     if (instructions.written().len == 0) {
-        instructions.writer.writeAll("You are a helpful assistant.") catch {};
+        try instructions.writer.writeAll("You are a helpful assistant.");
     }
 
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -76,16 +76,17 @@ pub fn buildRequest(
     try std.json.Stringify.value(request.model, .{}, writer);
     try writer.writeAll(",\"stream\":true,\"max_tokens\":");
     try writer.print("{d}", .{request.max_output_tokens orelse 8192});
-    try writer.writeAll(",\"system\":");
+    try writer.writeAll(",\"system\":[{\"type\":\"text\",\"text\":");
     try std.json.Stringify.value(instructions.written(), .{}, writer);
+    try writer.writeAll("}]");
     try writer.writeAll(",\"messages\":[");
     try writeMessages(writer, alloc, request.messages, request.verified_images);
     try writer.writeByte(']');
-    _ = try writeTools(writer, alloc, request.serialized_tools, request.selected_dynamic_tool_schemas);
-    if (request.tool_choice != .auto and request.tool_choice != .none) {
-        try writer.writeAll(",\"tool_choice\":{");
-        try writer.writeAll("\"type\":\"any\"");
-        try writer.writeByte('}');
+    const tool_count = try writeTools(writer, alloc, request.serialized_tools, request.selected_dynamic_tool_schemas);
+    if (tool_count != 0 and request.tool_choice == .required) {
+        const supports_forced_tools = !std.mem.startsWith(u8, request.model, "claude-fable-") and
+            !std.mem.startsWith(u8, request.model, "claude-mythos-");
+        try writer.writeAll(if (supports_forced_tools) ",\"tool_choice\":{\"type\":\"any\"}" else ",\"tool_choice\":{\"type\":\"auto\"}");
     }
     try writer.writeByte('}');
     return out.toOwnedSlice();
@@ -151,8 +152,7 @@ fn writeMessages(
                 try std.json.Stringify.value(message.tool_call_id orelse "", .{}, writer);
                 try writer.writeAll(",\"content\":");
                 try std.json.Stringify.value(message.content orelse "", .{}, writer);
-                try writer.writeByte('}');
-                try writer.writeByte(']');
+                try writer.writeAll("}]}");
             },
         }
     }
@@ -234,23 +234,11 @@ fn streamCompletion(
     alloc: Allocator,
     request: stream_provider.Request,
 ) !stream_provider.Result {
-    return streamCompletionCore(alloc, request) catch |err| {
+    return streamHttpCompletion(alloc, request) catch |err| {
         if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
         request.attempt_evidence.network_failure = gateway_client.networkFailureEvidence(err, request.delivery.load());
         return err;
     };
-}
-
-fn streamCompletionCore(alloc: Allocator, request: stream_provider.Request) !stream_provider.Result {
-    if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
-    if (request.credential_source != .claude_subscription) {
-        return error.ClaudeSubscriptionCredentialRequired;
-    }
-    try validateModel(request.model);
-    if (io_mod.getenv(e2e_endpoint_env) != null) {
-        return streamHttpCompletion(alloc, request);
-    }
-    return anthropic_claude_cli.streamCompletion(alloc, request);
 }
 
 pub fn streamHttpCompletion(alloc: Allocator, request: stream_provider.Request) !stream_provider.Result {
@@ -263,13 +251,18 @@ pub fn streamHttpCompletion(alloc: Allocator, request: stream_provider.Request) 
     try validateModel(request.model);
     const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.api_key});
     defer secret.zeroAndFree(alloc, auth_header);
-    const request_endpoint = if (io_mod.getenv(e2e_endpoint_env)) |override| endpoint: {
+    const override_endpoint = io_mod.getenv(e2e_endpoint_env);
+    const request_endpoint = if (override_endpoint) |override| endpoint: {
         if (!gateway_client.isLoopbackHttpUrl(override)) return error.InvalidE2EAnthropicClaudeEndpoint;
         break :endpoint override;
     } else endpoint;
+    const direct = override_endpoint == null;
+    const prepared = if (direct) try claude_code_protocol.prepare(alloc, request.payload) else null;
+    defer if (prepared) |owned| alloc.free(owned);
+    const payload = prepared orelse request.payload;
     const uri = try std.Uri.parse(request_endpoint);
 
-    var extra_headers_buf: [5]std.http.Header = undefined;
+    var extra_headers_buf: [9]std.http.Header = undefined;
     var extra_count: usize = 0;
     extra_headers_buf[extra_count] = .{ .name = "anthropic-version", .value = anthropic_version };
     extra_count += 1;
@@ -279,8 +272,29 @@ pub fn streamHttpCompletion(alloc: Allocator, request: stream_provider.Request) 
     extra_count += 1;
     extra_headers_buf[extra_count] = .{ .name = "originator", .value = claude_oauth.messages_originator };
     extra_count += 1;
-    extra_headers_buf[extra_count] = .{ .name = "accept", .value = "text/event-stream" };
+    extra_headers_buf[extra_count] = .{ .name = "accept", .value = if (direct) "application/json" else "text/event-stream" };
     extra_count += 1;
+
+    var request_id: [36]u8 = undefined;
+    var session_id: [36]u8 = undefined;
+    if (direct) {
+        var seed: [16]u8 = undefined;
+        io_mod.getIo().random(&seed);
+        request_id = claude_code_protocol.uuid(seed);
+        extra_headers_buf[extra_count] = .{ .name = "x-client-request-id", .value = &request_id };
+        extra_count += 1;
+        extra_headers_buf[extra_count] = .{ .name = "x-app", .value = "cli" };
+        extra_count += 1;
+        extra_headers_buf[extra_count] = .{ .name = "anthropic-dangerous-direct-browser-access", .value = "true" };
+        extra_count += 1;
+        if (request.session_id) |id| {
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(id, &digest, .{});
+            session_id = claude_code_protocol.uuid(digest[0..16].*);
+            extra_headers_buf[extra_count] = .{ .name = "x-claude-code-session-id", .value = &session_id };
+            extra_count += 1;
+        }
+    }
 
     var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
     defer client.deinit();
@@ -288,6 +302,7 @@ pub fn streamHttpCompletion(alloc: Allocator, request: stream_provider.Request) 
         .client = &client,
         .uri = uri,
         .auth_header = auth_header,
+        .user_agent = if (direct) claude_code_protocol.user_agent else claude_oauth.messages_user_agent,
         .extra_headers = extra_headers_buf[0..extra_count],
     };
     const connect_deadline = std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
@@ -318,17 +333,18 @@ pub fn streamHttpCompletion(alloc: Allocator, request: stream_provider.Request) 
     }
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
 
-    http_request.transfer_encoding = .{ .content_length = request.payload.len };
+    http_request.transfer_encoding = .{ .content_length = payload.len };
     var send_buffer: [8192]u8 = undefined;
     request.delivery.markPossiblySent();
     var body_writer = try http_request.sendBodyUnflushed(&send_buffer);
-    try body_writer.writer.writeAll(request.payload);
+    try body_writer.writer.writeAll(payload);
     try body_writer.end();
     if (http_request.connection) |connection| try connection.flush();
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
 
     var response = try http_request.receiveHead(&.{});
     if (response.head.status != .ok) {
+        const retry_after_seconds = gateway_client.retryAfterSeconds(response.head);
         var transfer: [16 * 1024]u8 = undefined;
         const reader = response.reader(&transfer);
         const body = reader.allocRemaining(alloc, .limited(max_error_body_bytes)) catch |err| switch (err) {
@@ -338,6 +354,7 @@ pub fn streamHttpCompletion(alloc: Allocator, request: stream_provider.Request) 
         return .{
             .status = response.head.status,
             .err_body = body,
+            .retry_after_seconds = retry_after_seconds,
             .ownership = .owned,
         };
     }
@@ -666,6 +683,7 @@ const OpenRequestOperation = struct {
     client: *std.http.Client,
     uri: std.Uri,
     auth_header: []const u8,
+    user_agent: []const u8,
     extra_headers: []const std.http.Header,
 
     pub fn run(self: *@This()) !OpenedRequest {
@@ -674,7 +692,7 @@ const OpenRequestOperation = struct {
                 .content_type = .{ .override = "application/json" },
                 .authorization = .{ .override = self.auth_header },
                 .accept_encoding = .omit,
-                .user_agent = .{ .override = claude_oauth.messages_user_agent },
+                .user_agent = .{ .override = self.user_agent },
             },
             .extra_headers = self.extra_headers,
             .keep_alive = false,
@@ -705,6 +723,30 @@ test "Anthropic Claude request uses Messages wire format" {
     try std.testing.expect(std.mem.find(u8, body, "\"model\":\"claude-sonnet-4-5\"") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"stream\":true") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"messages\"") != null);
-    try std.testing.expect(std.mem.find(u8, body, "\"tool_use\"") != null);
-    try std.testing.expect(std.mem.find(u8, body, "\"tool_result\"") != null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const wire_messages = parsed.value.object.get("messages").?.array.items;
+    const tool_result = wire_messages[2].object.get("content").?.array.items[0].object;
+    try std.testing.expectEqualStrings("tool_result", tool_result.get("type").?.string);
+    try std.testing.expectEqualStrings("toolu_1", tool_result.get("tool_use_id").?.string);
+    try std.testing.expectEqualStrings("contents", tool_result.get("content").?.string);
+}
+
+test "Claude Fable keeps requested tools without forcing their use or changing thinking" {
+    const alloc = std.testing.allocator;
+    const body = try buildRequest(null, alloc, .{
+        .model = "claude-fable-5-2",
+        .serialized_tools = "[{\"type\":\"function\",\"name\":\"read_file\",\"inputSchema\":{\"type\":\"object\"}}]",
+        .messages = &.{ .{ .role = .system, .content = "Use fx tools." }, .{ .role = .user, .content = "Read it." } },
+        .tool_choice = .required,
+        .provider_options = .{ .reasoning = types.ReasoningEffort.literal("high") },
+    });
+    defer alloc.free(body);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expectEqualStrings("auto", object.get("tool_choice").?.object.get("type").?.string);
+    try std.testing.expectEqualStrings("read_file", object.get("tools").?.array.items[0].object.get("name").?.string);
+    try std.testing.expectEqualStrings("Use fx tools.", object.get("system").?.array.items[0].object.get("text").?.string);
+    try std.testing.expect(object.get("thinking") == null and object.get("output_config") == null);
 }
